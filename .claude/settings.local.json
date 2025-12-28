@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(nest:*)",
+      "Bash(npx @nestjs/cli new:*)",
+      "Bash(npm install:*)",
+      "Bash(mkdir:*)",
+      "Bash(cat:*)",
+      "Bash(npm run build:*)",
+      "Bash(tree:*)",
+      "Bash(psql:*)",
+      "Bash(lsof:*)"
+    ]
+  }
+}
