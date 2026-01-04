@@ -5,9 +5,20 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, {
+    bodyParser: false, // 禁用默认的 body parser
+  });
 
   app.setGlobalPrefix('api');
+
+  // 手动配置 body parser，支持多种格式
+  const express = require('express');
+  app.use(
+    express.json({ limit: '10mb' }), // JSON 格式
+    express.urlencoded({ extended: true, limit: '10mb' }), // Form 格式
+    express.text({ type: 'text/*', limit: '10mb' }), // Text 格式（包括 text/html, text/plain）
+    express.raw({ type: 'application/octet-stream', limit: '10mb' }), // 二进制格式
+  );
 
   app.enableCors({
     origin: process.env.CORS_ORIGIN || '*',
@@ -18,7 +29,8 @@ async function bootstrap() {
     new ValidationPipe({
       whitelist: true,
       transform: true,
-      forbidNonWhitelisted: true,
+      forbidNonWhitelisted: false, // 改为 false，允许额外字段
+      skipMissingProperties: true, // 跳过缺失的属性
     }),
   );
 

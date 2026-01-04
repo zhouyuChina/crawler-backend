@@ -9,7 +9,8 @@
       "Bash(npm run build:*)",
       "Bash(tree:*)",
       "Bash(psql:*)",
-      "Bash(lsof:*)"
+      "Bash(lsof:*)",
+      "Bash(curl:*)"
     ]
   }
 }
