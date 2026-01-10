@@ -58,4 +58,33 @@ export class WebsocketGateway
   broadcastStatisticsUpdate(stats: any) {
     this.server.emit('statistics:updated', stats);
   }
+
+  // 广播请求接收事件
+  broadcastRequestReceived(data: {
+    id: string;
+    url: string;
+    method?: string;
+    timestamp: string;
+    status: 'processing';
+  }) {
+    this.server.emit('request:received', data);
+    this.logger.log(`广播请求接收: ${data.method} ${data.url}`);
+  }
+
+  // 广播请求处理完成事件
+  broadcastRequestProcessed(data: {
+    id: string;
+    url: string;
+    method?: string;
+    status: 'success' | 'error';
+    message?: string;
+    error?: string;
+    skipped?: boolean;
+    webpageId?: string;
+    responseBody?: string;
+    statusCode?: number;
+  }) {
+    this.server.emit('request:processed', data);
+    this.logger.log(`广播请求处理完成: ${data.status} - ${data.url}`);
+  }
 }

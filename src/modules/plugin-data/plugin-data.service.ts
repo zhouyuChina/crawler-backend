@@ -4,6 +4,10 @@ import { ScreenshotService } from '../screenshot/screenshot.service';
 import { WebsocketGateway } from '../websocket/websocket.gateway';
 import { PluginSubmitDto } from './dto/plugin-submit.dto';
 import { BrowserRequestDto } from './dto/browser-request.dto';
+import { ProxyRequestDto } from './dto/proxy-request.dto';
+import { v4 as uuidv4 } from 'uuid';
+import * as http from 'http';
+import * as https from 'https';
 
 @Injectable()
 export class PluginDataService {
@@ -45,110 +49,154 @@ export class PluginDataService {
   }
 
   async processBrowserRequest(dto: BrowserRequestDto) {
-    // 检查是否有数据可存储
-    const hasRequestBody = dto.requestBody && dto.requestBody.trim().length > 0;
-    const hasResponseBody =
-      dto.responseBody && dto.responseBody.trim().length > 0;
+    const requestId = uuidv4();
+    const timestamp = new Date().toISOString();
 
-    // 如果 requestBody 和 responseBody 都没有值，不存储到数据库
-    if (!hasRequestBody && !hasResponseBody) {
-      return {
-        success: true,
-        message: '请求已接收，但无数据需要存储',
-        skipped: true,
-      };
-    }
-
-    const url = new URL(dto.url);
-    const domain = url.hostname;
-
-    // 处理 requestBody：判断是 JSON 还是 HTML
-    let content = '';
-    let htmlContent = '';
-
-    // 优先处理 requestBody
-    if (hasRequestBody && dto.requestBody) {
-      const requestBodyStr = dto.requestBody.trim();
-
-      // 判断是否为 HTML（检查是否包含 HTML 标签）
-      const isHtml =
-        /^\s*<!DOCTYPE\s+html/i.test(requestBodyStr) ||
-        /^\s*<html[\s>]/i.test(requestBodyStr) ||
-        /<html[\s>]/i.test(requestBodyStr);
-
-      // 判断是否为 JSON（尝试解析）
-      let isJson = false;
-      if (!isHtml) {
-        try {
-          JSON.parse(requestBodyStr);
-          isJson = true;
-        } catch {
-          // 不是有效的 JSON
-        }
-      }
-
-      if (isHtml) {
-        // HTML 数据存到 htmlContent
-        htmlContent = requestBodyStr;
-      } else if (isJson) {
-        // JSON 数据存到 content
-        content = requestBodyStr;
-      } else {
-        // 其他类型（纯文本等）存到 content
-        content = requestBodyStr;
-      }
-    }
-
-    // 如果有 responseBody，也处理它
-    if (hasResponseBody && dto.responseBody) {
-      const responseBodyStr = dto.responseBody.trim();
-
-      // 如果 requestBody 没有填充 htmlContent，则用 responseBody 填充
-      if (!htmlContent) {
-        // 判断 responseBody 是否为 HTML
-        const isHtml =
-          /^\s*<!DOCTYPE\s+html/i.test(responseBodyStr) ||
-          /^\s*<html[\s>]/i.test(responseBodyStr) ||
-          /<html[\s>]/i.test(responseBodyStr);
-
-        if (isHtml) {
-          htmlContent = responseBodyStr;
-        } else if (!content) {
-          // 如果 content 还没有值，则使用 responseBody
-          content = responseBodyStr;
-        }
-      } else if (!content) {
-        // 如果 htmlContent 已有值但 content 没有，则用 responseBody 填充 content
-        content = responseBodyStr;
-      }
-    }
-
-    // 将浏览器请求数据转换为网页记录
-    const webpage = await this.webpageService.create({
+    // 广播请求接收事件
+    this.websocketGateway.broadcastRequestReceived({
+      id: requestId,
       url: dto.url,
-      title: `${dto.method || 'REQUEST'} - ${dto.url}`,
-      content,
-      htmlContent,
-      domain,
-      metadata: {
-        description: `${dto.method} request to ${dto.url}`,
-        requestMethod: dto.method,
-        statusCode: dto.statusCode,
-        requestHeaders: dto.requestHeaders,
-        responseHeaders: dto.responseHeaders,
-      } as Record<string, unknown>,
-      sourcePluginId: 'browser-extension',
-      browserType: 'chrome',
-      capturedAt: dto.timestamp ? new Date(dto.timestamp) : new Date(),
+      method: dto.method,
+      timestamp,
+      status: 'processing',
     });
 
-    this.websocketGateway.broadcastWebpageCreated(webpage);
+    try {
+      // 检查是否有数据可存储
+      const hasRequestBody = dto.requestBody && dto.requestBody.trim().length > 0;
+      const hasResponseBody =
+        dto.responseBody && dto.responseBody.trim().length > 0;
 
-    return {
-      success: true,
-      message: '请求已接收',
-      webpageId: webpage.id,
-    };
+      // 如果 requestBody 和 responseBody 都没有值，不存储到数据库
+      if (!hasRequestBody && !hasResponseBody) {
+        this.websocketGateway.broadcastRequestProcessed({
+          id: requestId,
+          url: dto.url,
+          method: dto.method,
+          status: 'success',
+          message: '请求已接收，但无数据需要存储',
+          skipped: true,
+        });
+
+        return {
+          success: true,
+          message: '请求已接收，但无数据需要存储',
+          skipped: true,
+        };
+      }
+
+      const url = new URL(dto.url);
+      const domain = url.hostname;
+
+      // 处理 requestBody：判断是 JSON 还是 HTML
+      let content = '';
+      let htmlContent = '';
+
+      // 优先处理 requestBody
+      if (hasRequestBody && dto.requestBody) {
+        const requestBodyStr = dto.requestBody.trim();
+
+        // 判断是否为 HTML（检查是否包含 HTML 标签）
+        const isHtml =
+          /^\s*<!DOCTYPE\s+html/i.test(requestBodyStr) ||
+          /^\s*<html[\s>]/i.test(requestBodyStr) ||
+          /<html[\s>]/i.test(requestBodyStr);
+
+        // 判断是否为 JSON（尝试解析）
+        let isJson = false;
+        if (!isHtml) {
+          try {
+            JSON.parse(requestBodyStr);
+            isJson = true;
+          } catch {
+            // 不是有效的 JSON
+          }
+        }
+
+        if (isHtml) {
+          // HTML 数据存到 htmlContent
+          htmlContent = requestBodyStr;
+        } else if (isJson) {
+          // JSON 数据存到 content
+          content = requestBodyStr;
+        } else {
+          // 其他类型（纯文本等）存到 content
+          content = requestBodyStr;
+        }
+      }
+
+      // 如果有 responseBody，也处理它
+      if (hasResponseBody && dto.responseBody) {
+        const responseBodyStr = dto.responseBody.trim();
+
+        // 如果 requestBody 没有填充 htmlContent，则用 responseBody 填充
+        if (!htmlContent) {
+          // 判断 responseBody 是否为 HTML
+          const isHtml =
+            /^\s*<!DOCTYPE\s+html/i.test(responseBodyStr) ||
+            /^\s*<html[\s>]/i.test(responseBodyStr) ||
+            /<html[\s>]/i.test(responseBodyStr);
+
+          if (isHtml) {
+            htmlContent = responseBodyStr;
+          } else if (!content) {
+            // 如果 content 还没有值，则使用 responseBody
+            content = responseBodyStr;
+          }
+        } else if (!content) {
+          // 如果 htmlContent 已有值但 content 没有，则用 responseBody 填充 content
+          content = responseBodyStr;
+        }
+      }
+
+      // 将浏览器请求数据转换为网页记录
+      const webpage = await this.webpageService.create({
+        url: dto.url,
+        title: `${dto.method || 'REQUEST'} - ${dto.url}`,
+        content,
+        htmlContent,
+        domain,
+        metadata: {
+          description: `${dto.method} request to ${dto.url}`,
+          requestMethod: dto.method,
+          statusCode: dto.statusCode,
+          requestHeaders: dto.requestHeaders,
+          responseHeaders: dto.responseHeaders,
+        } as Record<string, unknown>,
+        sourcePluginId: 'browser-extension',
+        browserType: 'chrome',
+        capturedAt: dto.timestamp ? new Date(dto.timestamp) : new Date(),
+      });
+
+      this.websocketGateway.broadcastWebpageCreated(webpage);
+
+      // 广播请求处理成功
+      this.websocketGateway.broadcastRequestProcessed({
+        id: requestId,
+        url: dto.url,
+        method: dto.method,
+        status: 'success',
+        message: '请求已接收并存储',
+        webpageId: webpage.id,
+      });
+
+      return {
+        success: true,
+        message: '请求已接收',
+        webpageId: webpage.id,
+      };
+    } catch (error) {
+      // 广播请求处理失败
+      this.websocketGateway.broadcastRequestProcessed({
+        id: requestId,
+        url: dto.url,
+        method: dto.method,
+        status: 'error',
+        error: error.message || '处理请求时发生错误',
+      });
+
+      throw error;
+    }
   }
 
   async processHtmlContent(htmlContent: string, referer: string) {
@@ -200,5 +248,163 @@ export class PluginDataService {
       message: '请求已接收',
       webpageId: webpage.id,
     };
+  }
+
+  /**
+   * 代理请求：服务器代表插件发起 HTTP 请求，获取响应体
+   */
+  async proxyRequest(dto: ProxyRequestDto) {
+    const requestId = uuidv4();
+    const timestamp = new Date().toISOString();
+
+    // 广播请求接收事件
+    this.websocketGateway.broadcastRequestReceived({
+      id: requestId,
+      url: dto.url,
+      method: dto.method || 'GET',
+      timestamp,
+      status: 'processing',
+    });
+
+    try {
+      // 发起 HTTP/HTTPS 请求
+      const responseData = await this.makeHttpRequest(dto);
+
+      const url = new URL(dto.url);
+      const domain = url.hostname;
+
+      // 判断响应体类型
+      let content = '';
+      let htmlContent = '';
+
+      if (responseData.body) {
+        const bodyStr = responseData.body.trim();
+
+        // 判断是否为 HTML
+        const isHtml =
+          /^\s*<!DOCTYPE\s+html/i.test(bodyStr) ||
+          /^\s*<html[\s>]/i.test(bodyStr) ||
+          /<html[\s>]/i.test(bodyStr);
+
+        if (isHtml) {
+          htmlContent = bodyStr;
+        } else {
+          content = bodyStr;
+        }
+      }
+
+      // 存储到数据库
+      const webpage = await this.webpageService.create({
+        url: dto.url,
+        title: `${dto.method || 'GET'} - ${dto.url}`,
+        content,
+        htmlContent,
+        domain,
+        metadata: {
+          description: `Proxied ${dto.method || 'GET'} request to ${dto.url}`,
+          requestMethod: dto.method || 'GET',
+          statusCode: responseData.statusCode,
+          requestHeaders: dto.headers,
+          responseHeaders: responseData.headers,
+          proxied: true,
+        } as Record<string, unknown>,
+        sourcePluginId: 'browser-extension-proxy',
+        browserType: 'chrome',
+        capturedAt: new Date(),
+      });
+
+      this.websocketGateway.broadcastWebpageCreated(webpage);
+
+      // 广播请求处理成功
+      this.websocketGateway.broadcastRequestProcessed({
+        id: requestId,
+        url: dto.url,
+        method: dto.method || 'GET',
+        status: 'success',
+        message: `代理请求成功，状态码: ${responseData.statusCode}`,
+        webpageId: webpage.id,
+        responseBody: responseData.body, // 添加响应体
+        statusCode: responseData.statusCode,
+      });
+
+      return {
+        success: true,
+        message: '代理请求成功',
+        webpageId: webpage.id,
+        statusCode: responseData.statusCode,
+        responseBody: responseData.body,
+        responseHeaders: responseData.headers,
+      };
+    } catch (error) {
+      // 广播请求处理失败
+      this.websocketGateway.broadcastRequestProcessed({
+        id: requestId,
+        url: dto.url,
+        method: dto.method || 'GET',
+        status: 'error',
+        error: error.message || '代理请求失败',
+      });
+
+      throw error;
+    }
+  }
+
+  /**
+   * 发起 HTTP/HTTPS 请求
+   */
+  private makeHttpRequest(
+    dto: ProxyRequestDto,
+  ): Promise<{ statusCode: number; headers: any; body: string }> {
+    return new Promise((resolve, reject) => {
+      const url = new URL(dto.url);
+      const isHttps = url.protocol === 'https:';
+      const client = isHttps ? https : http;
+
+      const options = {
+        hostname: url.hostname,
+        port: url.port || (isHttps ? 443 : 80),
+        path: url.pathname + url.search,
+        method: dto.method || 'GET',
+        headers: dto.headers || {},
+        timeout: 30000, // 30 秒超时
+      };
+
+      // 设置 Content-Type
+      if (dto.contentType && dto.body) {
+        options.headers['Content-Type'] = dto.contentType;
+      }
+
+      const req = client.request(options, (res) => {
+        let body = '';
+
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+
+        res.on('end', () => {
+          resolve({
+            statusCode: res.statusCode || 0,
+            headers: res.headers,
+            body,
+          });
+        });
+      });
+
+      req.on('error', (error) => {
+        reject(new Error(`请求失败: ${error.message}`));
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('请求超时'));
+      });
+
+      // 如果有请求体，写入
+      if (dto.body) {
+        req.write(dto.body);
+      }
+
+      req.end();
+    });
   }
 }

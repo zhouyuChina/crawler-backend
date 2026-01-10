@@ -13,6 +13,7 @@ import { ConfigService } from '@nestjs/config';
 import { PluginDataService } from './plugin-data.service';
 import { PluginSubmitDto } from './dto/plugin-submit.dto';
 import { BrowserRequestDto } from './dto/browser-request.dto';
+import { ProxyRequestDto } from './dto/proxy-request.dto';
 import type { Request } from 'express';
 
 @Controller('plugin')
@@ -70,8 +71,41 @@ export class PluginDataController {
       return this.pluginDataService.processHtmlContent(htmlContent, referer);
     }
 
-    // 如果是 JSON 格式
-    console.log('✅ 识别为 JSON 格式');
+    // 检查是否是插件发来的代理请求（新格式）
+    if (body.dataType === 'request' && body.url) {
+      console.log('✅ 识别为插件代理请求格式');
+      console.log('URL:', body.url);
+      console.log('Method:', body.method);
+
+      // 转换 requestHeaders 从数组格式到对象格式
+      const headers: Record<string, string> = {};
+      if (Array.isArray(body.requestHeaders)) {
+        body.requestHeaders.forEach((header: { name: string; value: string }) => {
+          headers[header.name] = header.value;
+        });
+        console.log('✅ 已转换请求头格式，共', body.requestHeaders.length, '个');
+      }
+
+      // 调用代理请求服务
+      return this.pluginDataService.proxyRequest({
+        url: body.url,
+        method: body.method || 'GET',
+        headers: headers,
+        body: body.requestBody,
+        contentType: body.contentType,
+      });
+    }
+
+    // 如果是 JSON 格式（旧格式）
+    console.log('✅ 识别为 JSON 格式（旧格式）');
     return this.pluginDataService.processBrowserRequest(body);
+  }
+
+  @Post('proxy')
+  async proxyRequest(@Body() dto: ProxyRequestDto) {
+    console.log('🔄 收到代理请求');
+    console.log('URL:', dto.url);
+    console.log('Method:', dto.method || 'GET');
+    return this.pluginDataService.proxyRequest(dto);
   }
 }

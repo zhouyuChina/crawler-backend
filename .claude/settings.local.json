@@ -10,7 +10,11 @@
       "Bash(tree:*)",
       "Bash(psql:*)",
       "Bash(lsof:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(npm run start:dev:*)",
+      "Bash(xargs kill:*)",
+      "Bash(node:*)",
+      "Bash(PGPASSWORD= psql:*)"
     ]
   }
 }

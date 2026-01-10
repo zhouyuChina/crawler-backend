@@ -1,13 +1,18 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
+import { join } from 'path';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bodyParser: false, // 禁用默认的 body parser
   });
+
+  // 配置静态文件服务
+  app.useStaticAssets(join(__dirname, '..', 'public'));
 
   app.setGlobalPrefix('api');
 
@@ -43,5 +48,6 @@ async function bootstrap() {
   console.log(`Application is running on: http://localhost:${port}`);
   console.log(`API endpoints: http://localhost:${port}/api`);
   console.log(`WebSocket: ws://localhost:${port}/ws`);
+  console.log(`Monitor page: http://localhost:${port}/api/monitor`);
 }
 bootstrap();

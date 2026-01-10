@@ -10,6 +10,7 @@ import { PluginDataModule } from './modules/plugin-data/plugin-data.module';
 import { WebsocketModule } from './modules/websocket/websocket.module';
 import { StatisticsModule } from './modules/statistics/statistics.module';
 import { StorageModule } from './modules/storage/storage.module';
+import { MonitorModule } from './modules/monitor/monitor.module';
 import { LoggerMiddleware } from './common/middleware/logger.middleware';
 
 @Module({
@@ -39,6 +40,7 @@ import { LoggerMiddleware } from './common/middleware/logger.middleware';
     WebsocketModule,
     StatisticsModule,
     StorageModule,
+    MonitorModule,
   ],
   controllers: [AppController],
   providers: [AppService],
