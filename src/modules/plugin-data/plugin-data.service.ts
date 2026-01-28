@@ -131,47 +131,45 @@ export class PluginDataService {
         }
 
         console.log('✅ 数据已变化，准备保存');
-      }
 
-      // 5. 解析响应体
-      let parsedData = null;
-      try {
-        parsedData = JSON.parse(responseBody);
-      } catch {
-        // 不是 JSON 格式，保持为 null
-      }
+        // 5. 解析响应体
+        let parsedData = null;
+        try {
+          parsedData = JSON.parse(responseBody);
+        } catch {
+          // 不是 JSON 格式，保持为 null
+        }
 
-      // 6. 计算哈希值
-      const hash = this.calculateHash(responseBody);
+        // 6. 计算哈希值
+        const hashValue = this.calculateHash(responseBody);
 
-      // 7. 保存到数据库
-      const callRecord = await this.callRecordService.create({
-        recordType,
-        url: dto.url,
-        requestBody: dto.requestBody,
-        responseBody,
-        parsedData,
-        dataHash: hash,
-        statusCode: responseData.statusCode,
-        metadata: {
-          requestMethod: dto.method || 'GET',
-          requestHeaders: dto.requestHeaders,
-          responseHeaders: responseData.headers,
-        },
-      });
+        // 7. 保存到数据库（变更检测类型使用 create）
+        const callRecord = await this.callRecordService.create({
+          recordType,
+          url: dto.url,
+          requestBody: dto.requestBody,
+          responseBody,
+          parsedData,
+          dataHash: hashValue,
+          statusCode: responseData.statusCode,
+          metadata: {
+            requestMethod: dto.method || 'GET',
+            requestHeaders: dto.requestHeaders,
+            responseHeaders: responseData.headers,
+          },
+        });
 
-      console.log(`💾 通话记录已保存: ${callRecord.id}`);
+        console.log(`💾 通话记录已保存: ${callRecord.id}`);
 
-      // 8. 广播 WebSocket 事件
-      this.websocketGateway.broadcastCallRecordCreated({
-        id: callRecord.id,
-        recordType: callRecord.recordType,
-        url: callRecord.url,
-        parsedData: callRecord.parsedData,
-        timestamp: callRecord.createdAt.toISOString(),
-      });
+        // 8. 广播 WebSocket 事件
+        this.websocketGateway.broadcastCallRecordCreated({
+          id: callRecord.id,
+          recordType: callRecord.recordType,
+          url: callRecord.url,
+          parsedData: callRecord.parsedData,
+          timestamp: callRecord.createdAt.toISOString(),
+        });
 
-      if (this.needsChangeDetection(recordType)) {
         const previousRecords = await this.callRecordService.findPreviousByType(
           recordType,
           callRecord.id,
@@ -184,27 +182,96 @@ export class PluginDataService {
           newData: callRecord.parsedData,
           timestamp: callRecord.createdAt.toISOString(),
         });
+
+        // 9. 广播请求处理成功
+        this.websocketGateway.broadcastRequestProcessed({
+          id: requestId,
+          url: dto.url,
+          method: dto.method,
+          status: 'success',
+          message: '通话记录已保存',
+          webpageId: callRecord.id,
+          responseBody,
+          statusCode: responseData.statusCode,
+        });
+
+        return {
+          success: true,
+          message: '通话记录已保存',
+          recordId: callRecord.id,
+          recordType: callRecord.recordType,
+          changed: true,
+        };
+      } else {
+        // get_curcall_in 和 get_curcall_out：使用 UPSERT
+        console.log(`🔄 ${recordType} 使用 UPSERT 策略`);
+
+        // 5. 解析响应体
+        let parsedData = null;
+        try {
+          parsedData = JSON.parse(responseBody);
+        } catch {
+          // 不是 JSON 格式，保持为 null
+        }
+
+        // 6. 计算哈希值
+        const hashValue = this.calculateHash(responseBody);
+
+        // 7. 从 parsedData 中提取唯一键
+        const uniqueKey = this.extractUniqueKey(recordType, parsedData);
+
+        // 8. 使用 UPSERT 保存或更新记录
+        const callRecord = await this.callRecordService.upsertByKey(
+          recordType,
+          uniqueKey,
+          {
+            recordType,
+            url: dto.url,
+            requestBody: dto.requestBody,
+            responseBody,
+            parsedData,
+            dataHash: hashValue,
+            statusCode: responseData.statusCode,
+            metadata: {
+              requestMethod: dto.method || 'GET',
+              requestHeaders: dto.requestHeaders,
+              responseHeaders: responseData.headers,
+              uniqueKey,
+            },
+          },
+        );
+
+        console.log(`💾 通话记录已更新: ${callRecord.id}`);
+
+        // 9. 广播更新事件
+        this.websocketGateway.broadcastCallRecordUpdated({
+          id: callRecord.id,
+          recordType: callRecord.recordType,
+          url: callRecord.url,
+          parsedData: callRecord.parsedData,
+          status: callRecord.status,
+          timestamp: callRecord.lastUpdateTime.toISOString(),
+        });
+
+        // 10. 广播请求处理成功
+        this.websocketGateway.broadcastRequestProcessed({
+          id: requestId,
+          url: dto.url,
+          method: dto.method,
+          status: 'success',
+          message: '通话记录已更新',
+          webpageId: callRecord.id,
+          responseBody,
+          statusCode: responseData.statusCode,
+        });
+
+        return {
+          success: true,
+          message: '通话记录已更新',
+          recordId: callRecord.id,
+          recordType: callRecord.recordType,
+        };
       }
-
-      // 9. 广播请求处理成功
-      this.websocketGateway.broadcastRequestProcessed({
-        id: requestId,
-        url: dto.url,
-        method: dto.method,
-        status: 'success',
-        message: '通话记录已保存',
-        webpageId: callRecord.id,
-        responseBody,
-        statusCode: responseData.statusCode,
-      });
-
-      return {
-        success: true,
-        message: '通话记录已保存',
-        recordId: callRecord.id,
-        recordType: callRecord.recordType,
-        changed: true,
-      };
     } catch (error) {
       // 错误处理
       this.websocketGateway.broadcastRequestProcessed({
@@ -386,6 +453,27 @@ export class PluginDataService {
    */
   private needsChangeDetection(recordType: string): boolean {
     return this.CHANGE_DETECTION_TYPES.includes(recordType);
+  }
+
+  /**
+   * 提取唯一键（用于 UPSERT）
+   */
+  private extractUniqueKey(recordType: string, parsedData: any): string {
+    if (!parsedData || !parsedData.calls || parsedData.calls.length === 0) {
+      return `${recordType}-${Date.now()}`;
+    }
+
+    const firstCall = parsedData.calls[0];
+
+    if (recordType === 'get_curcall_in') {
+      // 呼入：使用 被叫號碼 + 回撥號碼
+      return `${firstCall.calledNumber || ''}-${firstCall.callbackNumber || ''}`;
+    } else if (recordType === 'get_curcall_out') {
+      // 呼出：使用 主叫號碼 + 被叫號碼
+      return `${firstCall.callerNumber || ''}-${firstCall.calledNumber || ''}`;
+    }
+
+    return `${recordType}-${Date.now()}`;
   }
 
   /**

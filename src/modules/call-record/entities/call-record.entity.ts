@@ -47,6 +47,14 @@ export class CallRecord {
   @Column({ type: 'jsonb', nullable: true })
   metadata: any;
 
+  @Column({ type: 'varchar', length: 20, default: 'active' })
+  @Index()
+  status: string; // 'active' | 'ended'
+
+  @Column({ type: 'timestamp', default: () => 'CURRENT_TIMESTAMP' })
+  @Index()
+  lastUpdateTime: Date;
+
   @CreateDateColumn()
   @Index()
   createdAt: Date;

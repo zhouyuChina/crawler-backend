@@ -1,14 +1,17 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Inject, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { Cron } from '@nestjs/schedule';
 import {
   Repository,
   Between,
   LessThanOrEqual,
   MoreThanOrEqual,
+  LessThan,
 } from 'typeorm';
 import { CallRecord } from './entities/call-record.entity';
 import { CreateCallRecordDto } from './dto/create-call-record.dto';
 import { QueryCallRecordDto } from './dto/query-call-record.dto';
+import { WebsocketGateway } from '../websocket/websocket.gateway';
 import * as crypto from 'crypto';
 
 @Injectable()
@@ -16,6 +19,8 @@ export class CallRecordService {
   constructor(
     @InjectRepository(CallRecord)
     private readonly callRecordRepository: Repository<CallRecord>,
+    @Inject(forwardRef(() => WebsocketGateway))
+    private readonly websocketGateway: WebsocketGateway,
   ) {}
 
   /**
@@ -165,5 +170,111 @@ export class CallRecordService {
       today,
       lastHour,
     };
+  }
+
+  /**
+   * 创建或更新记录（UPSERT）
+   * 用于 get_curcall_in 和 get_curcall_out 的持续更新
+   */
+  async upsertByKey(
+    recordType: string,
+    uniqueKey: string,
+    dto: CreateCallRecordDto,
+  ): Promise<CallRecord> {
+    // 查找现有记录
+    const existing = await this.callRecordRepository.findOne({
+      where: {
+        recordType,
+        metadata: {
+          uniqueKey,
+        } as any,
+      },
+    });
+
+    if (existing) {
+      // 更新现有记录
+      if (dto.responseBody !== undefined) {
+        existing.responseBody = dto.responseBody;
+      }
+      existing.parsedData = dto.parsedData;
+      if (dto.dataHash !== undefined) {
+        existing.dataHash = dto.dataHash;
+      }
+      if (dto.statusCode !== undefined) {
+        existing.statusCode = dto.statusCode;
+      }
+      existing.lastUpdateTime = new Date();
+      existing.status = 'active'; // 重置为 active
+
+      return await this.callRecordRepository.save(existing);
+    } else {
+      // 创建新记录
+      const record = this.callRecordRepository.create({
+        ...dto,
+        status: 'active',
+        lastUpdateTime: new Date(),
+      });
+
+      return await this.callRecordRepository.save(record);
+    }
+  }
+
+  /**
+   * 定时任务：每秒检查并更新通话状态
+   */
+  @Cron('*/1 * * * * *') // 每秒执行
+  async updateCallStatus(): Promise<void> {
+    const threeSecondsAgo = new Date(Date.now() - 3000);
+
+    // 查找超过 3 秒未更新的 active 记录
+    const expiredRecords = await this.callRecordRepository.find({
+      where: {
+        status: 'active',
+        lastUpdateTime: LessThan(threeSecondsAgo),
+      },
+    });
+
+    if (expiredRecords.length === 0) {
+      return;
+    }
+
+    console.log(`🔍 发现 ${expiredRecords.length} 条通话已结束`);
+
+    // 批量更新状态为 ended
+    for (const record of expiredRecords) {
+      record.status = 'ended';
+      await this.callRecordRepository.save(record);
+
+      // 推送 WebSocket 事件
+      if (this.websocketGateway?.broadcastCallStatusChanged) {
+        this.websocketGateway.broadcastCallStatusChanged({
+          id: record.id,
+          recordType: record.recordType,
+          status: 'ended',
+          parsedData: record.parsedData,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      console.log(`✅ 通话已结束: ${record.id} (${record.recordType})`);
+    }
+  }
+
+  /**
+   * 定时任务：每 10 秒清理已结束的通话
+   */
+  @Cron('*/10 * * * * *') // 每 10 秒执行
+  async cleanupEndedCalls(): Promise<void> {
+    const sixtySecondsAgo = new Date(Date.now() - 60000);
+
+    // 删除超过 60 秒的已结束通话
+    const result = await this.callRecordRepository.delete({
+      status: 'ended',
+      lastUpdateTime: LessThan(sixtySecondsAgo),
+    });
+
+    if (result.affected && result.affected > 0) {
+      console.log(`🗑️ 清理了 ${result.affected} 条已结束的通话记录`);
+    }
   }
 }

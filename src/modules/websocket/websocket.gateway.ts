@@ -110,4 +110,29 @@ export class WebsocketGateway
     this.server.emit('data:changed', data);
     this.logger.log(`广播数据变更: ${data.recordType}`);
   }
+
+  // 广播通话记录更新事件（用于持续更新的通话）
+  broadcastCallRecordUpdated(data: {
+    id: string;
+    recordType: string;
+    url: string;
+    parsedData: any;
+    status: string;
+    timestamp: string;
+  }) {
+    this.server.emit('call-record:updated', data);
+    this.logger.log(`广播通话记录更新: ${data.recordType} - ${data.status}`);
+  }
+
+  // 广播通话状态变更事件
+  broadcastCallStatusChanged(data: {
+    id: string;
+    recordType: string;
+    status: string;
+    parsedData: any;
+    timestamp: string;
+  }) {
+    this.server.emit('call-status:changed', data);
+    this.logger.log(`广播通话状态变更: ${data.recordType} → ${data.status}`);
+  }
 }
