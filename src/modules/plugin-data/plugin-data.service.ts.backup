@@ -66,22 +66,7 @@ export class PluginDataService {
     const requestId = uuidv4();
     const timestamp = new Date().toISOString();
 
-    // 1. 检查 URL 是否包含关键词
-    const recordType = this.identifyRecordType(dto.url);
-
-    // 如果不包含关键词，跳过处理
-    if (!recordType) {
-      console.log('⏭️ URL 不包含关键词，跳过处理:', dto.url);
-      return {
-        success: true,
-        message: 'URL 不包含关键词，已跳过',
-        skipped: true,
-      };
-    }
-
-    console.log(`✅ 识别为 ${recordType} 类型请求`);
-
-    // 2. 广播请求接收事件
+    // 广播请求接收事件
     this.websocketGateway.broadcastRequestReceived({
       id: requestId,
       url: dto.url,
@@ -91,128 +76,137 @@ export class PluginDataService {
     });
 
     try {
-      // 3. 发起代理请求获取响应体
-      const responseData = await this.makeHttpRequest({
-        url: dto.url,
-        method: dto.method || 'GET',
-        headers: this.parseHeaders(dto.requestHeaders),
-        body: dto.requestBody,
-      });
+      // 检查是否有数据可存储
+      const hasRequestBody = dto.requestBody && dto.requestBody.trim().length > 0;
+      const hasResponseBody =
+        dto.responseBody && dto.responseBody.trim().length > 0;
 
-      const responseBody = responseData.body;
+      // 如果 requestBody 和 responseBody 都没有值，不存储到数据库
+      if (!hasRequestBody && !hasResponseBody) {
+        this.websocketGateway.broadcastRequestProcessed({
+          id: requestId,
+          url: dto.url,
+          method: dto.method,
+          status: 'success',
+          message: '请求已接收，但无数据需要存储',
+          skipped: true,
+        });
 
-      // 4. 判断是否需要变更检测
-      if (this.needsChangeDetection(recordType)) {
-        console.log(`🔍 ${recordType} 需要变更检测`);
+        return {
+          success: true,
+          message: '请求已接收，但无数据需要存储',
+          skipped: true,
+        };
+      }
 
-        const { changed, hash } = await this.callRecordService.hasDataChanged(
-          recordType,
-          responseBody,
-        );
+      const url = new URL(dto.url);
+      const domain = url.hostname;
 
-        if (!changed) {
-          console.log('⏭️ 数据未变化，跳过保存');
+      // 处理 requestBody：判断是 JSON 还是 HTML
+      let content = '';
+      let htmlContent = '';
 
-          this.websocketGateway.broadcastRequestProcessed({
-            id: requestId,
-            url: dto.url,
-            method: dto.method,
-            status: 'success',
-            message: '数据未变化，已跳过',
-            skipped: true,
-          });
+      // 优先处理 requestBody
+      if (hasRequestBody && dto.requestBody) {
+        const requestBodyStr = dto.requestBody.trim();
 
-          return {
-            success: true,
-            message: '数据未变化，已跳过',
-            skipped: true,
-            reason: 'data_unchanged',
-          };
+        // 判断是否为 HTML（检查是否包含 HTML 标签）
+        const isHtml =
+          /^\s*<!DOCTYPE\s+html/i.test(requestBodyStr) ||
+          /^\s*<html[\s>]/i.test(requestBodyStr) ||
+          /<html[\s>]/i.test(requestBodyStr);
+
+        // 判断是否为 JSON（尝试解析）
+        let isJson = false;
+        if (!isHtml) {
+          try {
+            JSON.parse(requestBodyStr);
+            isJson = true;
+          } catch {
+            // 不是有效的 JSON
+          }
         }
 
-        console.log('✅ 数据已变化，准备保存');
+        if (isHtml) {
+          // HTML 数据存到 htmlContent
+          htmlContent = requestBodyStr;
+        } else if (isJson) {
+          // JSON 数据存到 content
+          content = requestBodyStr;
+        } else {
+          // 其他类型（纯文本等）存到 content
+          content = requestBodyStr;
+        }
       }
 
-      // 5. 解析响应体
-      let parsedData = null;
-      try {
-        parsedData = JSON.parse(responseBody);
-      } catch {
-        // 不是 JSON 格式，保持为 null
+      // 如果有 responseBody，也处理它
+      if (hasResponseBody && dto.responseBody) {
+        const responseBodyStr = dto.responseBody.trim();
+
+        // 如果 requestBody 没有填充 htmlContent，则用 responseBody 填充
+        if (!htmlContent) {
+          // 判断 responseBody 是否为 HTML
+          const isHtml =
+            /^\s*<!DOCTYPE\s+html/i.test(responseBodyStr) ||
+            /^\s*<html[\s>]/i.test(responseBodyStr) ||
+            /<html[\s>]/i.test(responseBodyStr);
+
+          if (isHtml) {
+            htmlContent = responseBodyStr;
+          } else if (!content) {
+            // 如果 content 还没有值，则使用 responseBody
+            content = responseBodyStr;
+          }
+        } else if (!content) {
+          // 如果 htmlContent 已有值但 content 没有，则用 responseBody 填充 content
+          content = responseBodyStr;
+        }
       }
 
-      // 6. 计算哈希值
-      const hash = this.calculateHash(responseBody);
-
-      // 7. 保存到数据库
-      const callRecord = await this.callRecordService.create({
-        recordType,
+      // 将浏览器请求数据转换为网页记录
+      const webpage = await this.webpageService.create({
         url: dto.url,
-        requestBody: dto.requestBody,
-        responseBody,
-        parsedData,
-        dataHash: hash,
-        statusCode: responseData.statusCode,
+        title: `${dto.method || 'REQUEST'} - ${dto.url}`,
+        content,
+        htmlContent,
+        domain,
         metadata: {
-          requestMethod: dto.method || 'GET',
+          description: `${dto.method} request to ${dto.url}`,
+          requestMethod: dto.method,
+          statusCode: dto.statusCode,
           requestHeaders: dto.requestHeaders,
-          responseHeaders: responseData.headers,
-        },
+          responseHeaders: dto.responseHeaders,
+        } as Record<string, unknown>,
+        sourcePluginId: 'browser-extension',
+        browserType: 'chrome',
+        capturedAt: dto.timestamp ? new Date(dto.timestamp) : new Date(),
       });
 
-      console.log(`💾 通话记录已保存: ${callRecord.id}`);
+      this.websocketGateway.broadcastWebpageCreated(webpage);
 
-      // 8. 广播 WebSocket 事件
-      this.websocketGateway.broadcastCallRecordCreated({
-        id: callRecord.id,
-        recordType: callRecord.recordType,
-        url: callRecord.url,
-        parsedData: callRecord.parsedData,
-        timestamp: callRecord.createdAt.toISOString(),
-      });
-
-      if (this.needsChangeDetection(recordType)) {
-        const previousRecords = await this.callRecordService.findPreviousByType(
-          recordType,
-          callRecord.id,
-          1,
-        );
-
-        this.websocketGateway.broadcastDataChanged({
-          recordType,
-          oldData: previousRecords[0]?.parsedData || null,
-          newData: callRecord.parsedData,
-          timestamp: callRecord.createdAt.toISOString(),
-        });
-      }
-
-      // 9. 广播请求处理成功
+      // 广播请求处理成功
       this.websocketGateway.broadcastRequestProcessed({
         id: requestId,
         url: dto.url,
         method: dto.method,
         status: 'success',
-        message: '通话记录已保存',
-        webpageId: callRecord.id,
-        responseBody,
-        statusCode: responseData.statusCode,
+        message: '请求已接收并存储',
+        webpageId: webpage.id,
       });
 
       return {
         success: true,
-        message: '通话记录已保存',
-        recordId: callRecord.id,
-        recordType: callRecord.recordType,
-        changed: true,
+        message: '请求已接收',
+        webpageId: webpage.id,
       };
     } catch (error) {
-      // 错误处理
+      // 广播请求处理失败
       this.websocketGateway.broadcastRequestProcessed({
         id: requestId,
         url: dto.url,
         method: dto.method,
         status: 'error',
-        error: error.message || '处理请求失败',
+        error: error.message || '处理请求时发生错误',
       });
 
       throw error;
@@ -367,49 +361,6 @@ export class PluginDataService {
 
       throw error;
     }
-  }
-
-  /**
-   * 识别 URL 中的记录类型
-   */
-  private identifyRecordType(url: string): string | null {
-    for (const keyword of this.ALLOWED_KEYWORDS) {
-      if (url.includes(keyword)) {
-        return keyword;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * 判断是否需要变更检测
-   */
-  private needsChangeDetection(recordType: string): boolean {
-    return this.CHANGE_DETECTION_TYPES.includes(recordType);
-  }
-
-  /**
-   * 计算哈希值
-   */
-  private calculateHash(data: string): string {
-    return crypto.createHash('md5').update(data).digest('hex');
-  }
-
-  /**
-   * 解析请求头
-   */
-  private parseHeaders(headers: any): Record<string, string> {
-    const result: Record<string, string> = {};
-
-    if (Array.isArray(headers)) {
-      headers.forEach((header: { name: string; value: string }) => {
-        result[header.name] = header.value;
-      });
-    } else if (typeof headers === 'object') {
-      Object.assign(result, headers);
-    }
-
-    return result;
   }
 
   /**

@@ -87,4 +87,27 @@ export class WebsocketGateway
     this.server.emit('request:processed', data);
     this.logger.log(`广播请求处理完成: ${data.status} - ${data.url}`);
   }
+
+  // 广播通话记录创建事件
+  broadcastCallRecordCreated(data: {
+    id: string;
+    recordType: string;
+    url: string;
+    parsedData: any;
+    timestamp: string;
+  }) {
+    this.server.emit('call-record:created', data);
+    this.logger.log(`广播通话记录创建: ${data.recordType}`);
+  }
+
+  // 广播数据变更事件
+  broadcastDataChanged(data: {
+    recordType: string;
+    oldData: any;
+    newData: any;
+    timestamp: string;
+  }) {
+    this.server.emit('data:changed', data);
+    this.logger.log(`广播数据变更: ${data.recordType}`);
+  }
 }
