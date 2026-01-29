@@ -2,7 +2,7 @@
 
 **基础 URL**: `http://localhost:9000/api`
 
-**版本**: v0.2
+**版本**: v0.3
 
 **协议**: HTTP/HTTPS
 
@@ -12,10 +12,11 @@
 
 1. [插件数据接口](#插件数据接口)
 2. [网页数据接口](#网页数据接口)
-3. [统计分析接口](#统计分析接口)
-4. [文件访问接口](#文件访问接口)
-5. [监控页面](#监控页面)
-6. [WebSocket 实时推送](#websocket-实时推送)
+3. [通话记录接口](#通话记录接口)
+4. [统计分析接口](#统计分析接口)
+5. [文件访问接口](#文件访问接口)
+6. [监控页面](#监控页面)
+7. [WebSocket 实时推送](#websocket-实时推送)
 
 ---
 
@@ -394,6 +395,313 @@ fetch('http://localhost:9000/api/webpage/uuid-string', {
 
 ---
 
+## 通话记录接口
+
+### 1. 获取通话记录列表
+
+**描述**: 分页查询通话记录
+
+**请求方式**: `GET /api/call-records`
+
+**查询参数**:
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| page | number | ❌ | 1 | 页码 |
+| limit | number | ❌ | 10 | 每页数量 |
+| recordType | string | ❌ | - | 记录类型筛选 |
+| startDate | string | ❌ | - | 开始日期 (YYYY-MM-DD) |
+| endDate | string | ❌ | - | 结束日期 (YYYY-MM-DD) |
+
+**recordType 可选值**:
+- `get_curcall_in` - 呼入通话记录
+- `get_curcall_out` - 呼出通话记录
+- `get_peer_status` - 对端状态记录
+- `cont_controler` - 控制器记录
+
+**成功响应**:
+
+```json
+{
+  "data": [
+    {
+      "id": "uuid-string",
+      "recordType": "get_curcall_in",
+      "url": "http://example.com/api/get_curcall_in",
+      "requestBody": "",
+      "responseBody": "<html>...</html>",
+      "parsedData": {
+        "calls": [
+          {
+            "calledNumber": "1001",
+            "callbackNumber": "13800138000",
+            "callStatus": "通话中",
+            "startTime": "2026-01-29 22:26:19",
+            "duration": "00:00:15"
+          }
+        ]
+      },
+      "dataHash": "abc123...",
+      "statusCode": 200,
+      "status": "active",
+      "lastUpdateTime": "2026-01-29T14:26:34.000Z",
+      "metadata": {
+        "requestMethod": "GET",
+        "uniqueKey": "1001-13800138000"
+      },
+      "createdAt": "2026-01-29T14:26:19.000Z",
+      "updatedAt": "2026-01-29T14:26:34.000Z"
+    }
+  ],
+  "meta": {
+    "total": 50,
+    "page": 1,
+    "limit": 10,
+    "totalPages": 5
+  }
+}
+```
+
+**示例请求**:
+
+```javascript
+// 获取第1页，每页20条
+fetch('http://localhost:9000/api/call-records?page=1&limit=20')
+  .then(res => res.json())
+  .then(data => console.log(data));
+
+// 按记录类型筛选
+fetch('http://localhost:9000/api/call-records?recordType=get_curcall_in')
+  .then(res => res.json());
+
+// 日期范围查询
+fetch('http://localhost:9000/api/call-records?startDate=2026-01-01&endDate=2026-01-31')
+  .then(res => res.json());
+```
+
+---
+
+### 2. 获取单条通话记录详情
+
+**描述**: 根据 ID 获取通话记录完整信息
+
+**请求方式**: `GET /api/call-records/:id`
+
+**路径参数**:
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| id | string | ✅ | 通话记录 UUID |
+
+**成功响应**:
+
+```json
+{
+  "id": "uuid-string",
+  "recordType": "get_curcall_in",
+  "url": "http://example.com/api/get_curcall_in",
+  "requestBody": "",
+  "responseBody": "<html>...</html>",
+  "parsedData": {
+    "calls": [
+      {
+        "calledNumber": "1001",
+        "callbackNumber": "13800138000",
+        "callStatus": "通话中",
+        "startTime": "2026-01-29 22:26:19",
+        "duration": "00:00:15"
+      }
+    ]
+  },
+  "dataHash": "abc123...",
+  "statusCode": 200,
+  "status": "active",
+  "lastUpdateTime": "2026-01-29T14:26:34.000Z",
+  "metadata": {
+    "requestMethod": "GET",
+    "uniqueKey": "1001-13800138000"
+  },
+  "createdAt": "2026-01-29T14:26:19.000Z",
+  "updatedAt": "2026-01-29T14:26:34.000Z"
+}
+```
+
+**错误响应** (404):
+
+```json
+{
+  "statusCode": 404,
+  "message": "Record with ID xxx not found"
+}
+```
+
+**示例请求**:
+
+```javascript
+fetch('http://localhost:9000/api/call-records/4c9c6199-6662-49cf-82e3-4901808bd624')
+  .then(res => res.json())
+  .then(record => {
+    console.log('通话记录:', record);
+    console.log('解析数据:', record.parsedData);
+  });
+```
+
+---
+
+### 3. 获取指定类型的最新记录
+
+**描述**: 获取指定 recordType 的最新一条记录
+
+**请求方式**: `GET /api/call-records/latest/:recordType`
+
+**路径参数**:
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| recordType | string | ✅ | 记录类型 |
+
+**recordType 可选值**:
+- `get_curcall_in`
+- `get_curcall_out`
+- `get_peer_status`
+- `cont_controler`
+
+**成功响应**:
+
+```json
+{
+  "id": "uuid-string",
+  "recordType": "get_curcall_in",
+  "url": "http://example.com/api/get_curcall_in",
+  "parsedData": {
+    "calls": [
+      {
+        "calledNumber": "1001",
+        "callbackNumber": "13800138000",
+        "callStatus": "通话中",
+        "startTime": "2026-01-29 22:26:19",
+        "duration": "00:00:15"
+      }
+    ]
+  },
+  "status": "active",
+  "lastUpdateTime": "2026-01-29T14:26:34.000Z",
+  "createdAt": "2026-01-29T14:26:19.000Z"
+}
+```
+
+**错误响应** (404):
+
+```json
+{
+  "statusCode": 404,
+  "message": "No records found for type: get_curcall_in"
+}
+```
+
+**示例请求**:
+
+```javascript
+// 获取最新的呼入通话记录
+fetch('http://localhost:9000/api/call-records/latest/get_curcall_in')
+  .then(res => res.json())
+  .then(record => {
+    console.log('最新呼入通话:', record.parsedData);
+  });
+
+// 获取最新的对端状态
+fetch('http://localhost:9000/api/call-records/latest/get_peer_status')
+  .then(res => res.json())
+  .then(record => {
+    console.log('最新对端状态:', record.parsedData);
+  });
+```
+
+---
+
+### 4. 获取通话统计信息
+
+**描述**: 获取通话记录的统计数据
+
+**请求方式**: `GET /api/call-records/statistics`
+
+**成功响应**:
+
+```json
+{
+  "total": 150,
+  "byType": {
+    "get_curcall_in": 50,
+    "get_curcall_out": 45,
+    "get_peer_status": 30,
+    "cont_controler": 25
+  },
+  "byStatus": {
+    "active": 5,
+    "ended": 145
+  },
+  "todayCount": 20,
+  "activeCallsCount": 5
+}
+```
+
+**示例请求**:
+
+```javascript
+fetch('http://localhost:9000/api/call-records/statistics')
+  .then(res => res.json())
+  .then(stats => {
+    console.log('总记录数:', stats.total);
+    console.log('活跃通话数:', stats.activeCallsCount);
+    console.log('今日记录数:', stats.todayCount);
+  });
+```
+
+---
+
+### 5. 删除通话记录
+
+**描述**: 根据 ID 删除通话记录
+
+**请求方式**: `DELETE /api/call-records/:id`
+
+**路径参数**:
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| id | string | ✅ | 通话记录 UUID |
+
+**成功响应**:
+
+```json
+{
+  "message": "通话记录已删除"
+}
+```
+
+**错误响应** (404):
+
+```json
+{
+  "statusCode": 404,
+  "message": "Record with ID xxx not found"
+}
+```
+
+**示例请求**:
+
+```javascript
+fetch('http://localhost:9000/api/call-records/uuid-string', {
+  method: 'DELETE'
+})
+.then(res => res.json())
+.then(result => {
+  console.log(result.message);
+});
+```
+
+---
+
 ## 统计分析接口
 
 ### 1. 概览统计
@@ -587,6 +895,18 @@ socket.emit('subscribe:webpage');
 socket.emit('unsubscribe:webpage');
 ```
 
+##### 订阅通话记录更新
+
+```javascript
+socket.emit('subscribe:call-records');
+```
+
+##### 取消订阅通话记录更新
+
+```javascript
+socket.emit('unsubscribe:call-records');
+```
+
 ---
 
 #### 2. 服务器事件（接收）
@@ -734,7 +1054,135 @@ socket.on('statistics:updated', (data) => {
 
 ---
 
+##### 通话记录创建事件
+
+**事件名**: `call-record:created`
+
+**触发时机**: 新通话记录创建时（首次接收到通话数据）
+
+**数据格式**:
+
+```javascript
+socket.on('call-record:created', (data) => {
+  console.log('新通话记录:', data);
+  // 显示新通话通知
+  showNotification(`新通话: ${data.parsedData.calls[0]?.calledNumber}`);
+});
+```
+
+**数据结构**:
+
+```json
+{
+  "id": "uuid-string",
+  "recordType": "get_curcall_in",
+  "url": "http://example.com/api/get_curcall_in",
+  "parsedData": {
+    "calls": [
+      {
+        "calledNumber": "1001",
+        "callbackNumber": "13800138000",
+        "callStatus": "通话中",
+        "startTime": "2026-01-29 22:26:19",
+        "duration": "00:00:05"
+      }
+    ]
+  },
+  "timestamp": "2026-01-29T14:26:19.000Z"
+}
+```
+
+---
+
+##### 通话记录更新事件
+
+**事件名**: `call-record:updated`
+
+**触发时机**: 通话记录更新时（通话时长持续更新）
+
+**数据格式**:
+
+```javascript
+socket.on('call-record:updated', (data) => {
+  console.log('通话记录更新:', data);
+  // 更新 UI 中的通话时长
+  updateCallDuration(data.id, data.parsedData.calls[0]?.duration);
+});
+```
+
+**数据结构**:
+
+```json
+{
+  "id": "uuid-string",
+  "recordType": "get_curcall_in",
+  "url": "http://example.com/api/get_curcall_in",
+  "parsedData": {
+    "calls": [
+      {
+        "calledNumber": "1001",
+        "callbackNumber": "13800138000",
+        "callStatus": "通话中",
+        "startTime": "2026-01-29 22:26:19",
+        "duration": "00:00:15"
+      }
+    ]
+  },
+  "status": "active",
+  "timestamp": "2026-01-29T14:26:34.000Z"
+}
+```
+
+---
+
+##### 通话状态变更事件
+
+**事件名**: `call-status:changed`
+
+**触发时机**: 通话状态变更时（通话结束）
+
+**数据格式**:
+
+```javascript
+socket.on('call-status:changed', (data) => {
+  console.log('通话状态变更:', data);
+
+  if (data.status === 'ended') {
+    // 显示通话结束通知
+    showNotification(`通话已结束: ${data.parsedData.calls[0]?.calledNumber}`);
+    // 更新 UI 状态
+    markCallAsEnded(data.id);
+  }
+});
+```
+
+**数据结构**:
+
+```json
+{
+  "id": "uuid-string",
+  "recordType": "get_curcall_in",
+  "status": "ended",
+  "parsedData": {
+    "calls": [
+      {
+        "calledNumber": "1001",
+        "callbackNumber": "13800138000",
+        "callStatus": "通话中",
+        "startTime": "2026-01-29 22:26:19",
+        "duration": "00:00:15"
+      }
+    ]
+  },
+  "timestamp": "2026-01-29T14:26:37.000Z"
+}
+```
+
+---
+
 ### 完整 WebSocket 使用示例
+
+#### 示例 1: 监听网页数据更新
 
 ```javascript
 import io from 'socket.io-client';
@@ -811,6 +1259,252 @@ socket.on('webpage:deleted', (data) => {
 
 ---
 
+#### 示例 2: 监听通话记录实时更新
+
+```javascript
+import io from 'socket.io-client';
+
+// 连接 WebSocket
+const socket = io('http://localhost:9000/ws');
+
+// 存储活跃通话
+const activeCalls = new Map();
+
+socket.on('connect', () => {
+  console.log('✅ WebSocket 已连接');
+
+  // 订阅通话记录更新
+  socket.emit('subscribe:call-records');
+});
+
+// 监听新通话创建
+socket.on('call-record:created', (data) => {
+  console.log('📞 新通话创建:', data);
+
+  // 添加到活跃通话列表
+  activeCalls.set(data.id, {
+    ...data,
+    status: 'active'
+  });
+
+  // 显示通知
+  const call = data.parsedData?.calls?.[0];
+  if (call) {
+    showNotification({
+      title: '新来电',
+      message: `被叫号码: ${call.calledNumber}`,
+      type: 'info'
+    });
+  }
+
+  // 更新 UI
+  renderCallList(Array.from(activeCalls.values()));
+});
+
+// 监听通话记录更新（通话时长更新）
+socket.on('call-record:updated', (data) => {
+  console.log('🔄 通话更新:', data);
+
+  // 更新活跃通话列表
+  if (activeCalls.has(data.id)) {
+    activeCalls.set(data.id, {
+      ...data,
+      status: data.status
+    });
+
+    // 更新 UI 中的通话时长
+    const call = data.parsedData?.calls?.[0];
+    if (call) {
+      updateCallDuration(data.id, call.duration);
+    }
+  }
+});
+
+// 监听通话状态变更（通话结束）
+socket.on('call-status:changed', (data) => {
+  console.log('🔚 通话状态变更:', data);
+
+  if (data.status === 'ended') {
+    // 从活跃通话列表中移除
+    const call = activeCalls.get(data.id);
+    if (call) {
+      activeCalls.delete(data.id);
+
+      // 显示通话结束通知
+      const callData = data.parsedData?.calls?.[0];
+      if (callData) {
+        showNotification({
+          title: '通话已结束',
+          message: `被叫号码: ${callData.calledNumber}, 时长: ${callData.duration}`,
+          type: 'success'
+        });
+      }
+
+      // 更新 UI
+      markCallAsEnded(data.id);
+      renderCallList(Array.from(activeCalls.values()));
+    }
+  }
+});
+
+// 监听连接断开
+socket.on('disconnect', () => {
+  console.log('❌ WebSocket 已断开');
+  // 显示断线提示
+  showConnectionStatus('disconnected');
+});
+
+// 监听重新连接
+socket.on('reconnect', () => {
+  console.log('🔄 WebSocket 已重连');
+  // 重新订阅
+  socket.emit('subscribe:call-records');
+  showConnectionStatus('connected');
+});
+```
+
+---
+
+#### 示例 3: React Hook 封装
+
+```typescript
+import { useEffect, useState } from 'react';
+import { io, Socket } from 'socket.io-client';
+
+interface CallRecord {
+  id: string;
+  recordType: string;
+  parsedData: {
+    calls: Array<{
+      calledNumber: string;
+      callbackNumber: string;
+      callStatus: string;
+      startTime: string;
+      duration: string;
+    }>;
+  };
+  status: 'active' | 'ended';
+  timestamp: string;
+}
+
+export function useCallRecords() {
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [activeCalls, setActiveCalls] = useState<Map<string, CallRecord>>(new Map());
+  const [isConnected, setIsConnected] = useState(false);
+
+  useEffect(() => {
+    // 创建 WebSocket 连接
+    const newSocket = io('http://localhost:9000/ws');
+
+    newSocket.on('connect', () => {
+      console.log('✅ WebSocket 已连接');
+      setIsConnected(true);
+      newSocket.emit('subscribe:call-records');
+    });
+
+    newSocket.on('disconnect', () => {
+      console.log('❌ WebSocket 已断开');
+      setIsConnected(false);
+    });
+
+    // 监听通话创建
+    newSocket.on('call-record:created', (data: CallRecord) => {
+      console.log('📞 新通话:', data);
+      setActiveCalls(prev => {
+        const newCalls = new Map(prev);
+        newCalls.set(data.id, { ...data, status: 'active' });
+        return newCalls;
+      });
+    });
+
+    // 监听通话更新
+    newSocket.on('call-record:updated', (data: CallRecord) => {
+      console.log('🔄 通话更新:', data);
+      setActiveCalls(prev => {
+        const newCalls = new Map(prev);
+        if (newCalls.has(data.id)) {
+          newCalls.set(data.id, data);
+        }
+        return newCalls;
+      });
+    });
+
+    // 监听通话状态变更
+    newSocket.on('call-status:changed', (data: CallRecord) => {
+      console.log('🔚 通话状态变更:', data);
+      if (data.status === 'ended') {
+        setActiveCalls(prev => {
+          const newCalls = new Map(prev);
+          newCalls.delete(data.id);
+          return newCalls;
+        });
+      }
+    });
+
+    setSocket(newSocket);
+
+    // 清理函数
+    return () => {
+      newSocket.emit('unsubscribe:call-records');
+      newSocket.disconnect();
+    };
+  }, []);
+
+  return {
+    socket,
+    isConnected,
+    activeCalls: Array.from(activeCalls.values()),
+    activeCallsCount: activeCalls.size
+  };
+}
+
+// 使用示例
+function CallRecordList() {
+  const { activeCalls, isConnected, activeCallsCount } = useCallRecords();
+
+  return (
+    <div>
+      <div className="header">
+        <h2>活跃通话 ({activeCallsCount})</h2>
+        <span className={isConnected ? 'connected' : 'disconnected'}>
+          {isConnected ? '已连接' : '未连接'}
+        </span>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>被叫号码</th>
+            <th>回拨号码</th>
+            <th>状态</th>
+            <th>开始时间</th>
+            <th>通话时长</th>
+          </tr>
+        </thead>
+        <tbody>
+          {activeCalls.map(call => {
+            const callData = call.parsedData?.calls?.[0];
+            if (!callData) return null;
+
+            return (
+              <tr key={call.id} className={call.status}>
+                <td>{callData.calledNumber}</td>
+                <td>{callData.callbackNumber}</td>
+                <td>{callData.callStatus}</td>
+                <td>{callData.startTime}</td>
+                <td>{callData.duration}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+```
+
+---
+
 ## 错误处理
 
 ### HTTP 错误码
@@ -861,6 +1555,41 @@ socket.on('webpage:deleted', (data) => {
   createdAt: Date;            // 创建时间
   updatedAt: Date;            // 更新时间
   capturedAt: Date;           // 捕获时间
+}
+```
+
+---
+
+### CallRecord 对象
+
+```typescript
+{
+  id: string;                 // UUID
+  recordType: string;         // 记录类型 (get_curcall_in | get_curcall_out | get_peer_status | cont_controler)
+  url: string;                // 原始请求 URL
+  requestBody: string;        // 请求体内容
+  responseBody: string;       // 响应体内容（原始 HTML 或 JSON）
+  parsedData: {               // 解析后的结构化数据
+    calls?: Array<{           // 通话数据数组（仅 get_curcall_in 和 get_curcall_out）
+      calledNumber: string;   // 被叫号码
+      callbackNumber: string; // 回拨号码
+      callerNumber?: string;  // 主叫号码（仅 get_curcall_out）
+      callStatus: string;     // 呼叫状态
+      startTime: string;      // 开始时间
+      duration: string;       // 通话时长 (格式: HH:MM:SS)
+    }>;
+    // 其他类型的数据结构...
+  };
+  dataHash: string;           // MD5 哈希值（用于变更检测）
+  statusCode: number;         // HTTP 状态码
+  status: string;             // 通话状态 (active | ended)
+  lastUpdateTime: Date;       // 最后更新时间
+  metadata: {                 // 元数据
+    requestMethod?: string;   // 请求方法
+    uniqueKey?: string;       // 唯一键（用于 UPSERT）
+  };
+  createdAt: Date;            // 创建时间
+  updatedAt: Date;            // 更新时间
 }
 ```
 
@@ -957,6 +1686,89 @@ requestHeaders: [
 
 ---
 
+### 5. 通话记录实时监控
+
+使用 WebSocket 实时监听通话状态变化：
+
+```javascript
+const socket = io('http://localhost:9000/ws');
+
+// 订阅通话记录更新
+socket.emit('subscribe:call-records');
+
+// 监听新通话
+socket.on('call-record:created', (data) => {
+  console.log('新通话:', data.parsedData.calls[0]);
+  // 显示通知、更新 UI
+});
+
+// 监听通话更新（时长变化）
+socket.on('call-record:updated', (data) => {
+  console.log('通话时长更新:', data.parsedData.calls[0].duration);
+  // 更新 UI 中的时长显示
+});
+
+// 监听通话结束
+socket.on('call-status:changed', (data) => {
+  if (data.status === 'ended') {
+    console.log('通话已结束');
+    // 显示结束通知、更新 UI 状态
+  }
+});
+```
+
+---
+
+### 6. 通话记录查询优化
+
+```javascript
+// ✅ 推荐：按类型查询最新记录
+fetch('/api/call-records/latest/get_curcall_in')
+  .then(res => res.json())
+  .then(record => {
+    // 直接获取最新的呼入通话
+  });
+
+// ✅ 推荐：使用分页查询历史记录
+fetch('/api/call-records?page=1&limit=20&recordType=get_curcall_in')
+  .then(res => res.json());
+
+// ❌ 避免：不带参数查询所有记录
+fetch('/api/call-records')  // 默认只返回 10 条
+```
+
+---
+
+### 7. 通话状态管理
+
+前端应该维护活跃通话的状态：
+
+```javascript
+// 使用 Map 存储活跃通话
+const activeCalls = new Map();
+
+// 新通话创建时添加
+socket.on('call-record:created', (data) => {
+  activeCalls.set(data.id, data);
+});
+
+// 通话更新时更新
+socket.on('call-record:updated', (data) => {
+  if (activeCalls.has(data.id)) {
+    activeCalls.set(data.id, data);
+  }
+});
+
+// 通话结束时移除
+socket.on('call-status:changed', (data) => {
+  if (data.status === 'ended') {
+    activeCalls.delete(data.id);
+  }
+});
+```
+
+---
+
 ## 附录
 
 ### 环境配置
@@ -968,6 +1780,8 @@ requestHeaders: [
 
 - [插件集成完整文档](./PLUGIN_INTEGRATION_COMPLETE.md)
 - [浏览器插件示例](./BROWSER_PLUGIN_EXAMPLE.md)
+- [通话记录系统实现方案](./CALL_RECORD_IMPLEMENTATION.md)
+- [通话结束检测方案](./CALL_END_DETECTION.md)
 - [测试脚本使用说明](./README.md)
 
 ### 技术栈
@@ -979,6 +1793,6 @@ requestHeaders: [
 
 ---
 
-**最后更新**: 2026-01-09
+**最后更新**: 2026-01-29
 
 **维护者**: CRM 开发团队
