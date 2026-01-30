@@ -17,7 +17,8 @@
       "Bash(PGPASSWORD= psql:*)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: 实现通话记录管理系统（TDD方式）\n\n## 新增功能\n\n### 1. CallRecord 模块\n- 创建 CallRecord 实体和数据库表结构\n- 实现 CallRecordService（包含数据变更检测）\n- 实现 CallRecordController（查询、统计接口）\n- 完整的单元测试覆盖（9个测试用例）\n\n### 2. 请求过滤和数据分流\n- URL 关键词过滤（get_curcall_in, get_curcall_out, get_peer_status, cont_controler）\n- 包含关键词的请求保存到 call_records 表\n- 不包含关键词的请求直接跳过\n\n### 3. 智能数据变更检测\n- 针对 get_peer_status 和 cont_controler 实现变更检测\n- 使用 MD5 哈希值比较数据是否变化\n- 数据未变化时跳过保存，减少冗余数据\n\n### 4. WebSocket 实时推送\n- call-record:created 事件（新记录创建）\n- data:changed 事件（数据变更通知）\n- 保留原有的 request:received 和 request:processed 事件\n\n## 技术实现\n\n- 采用 TDD（测试驱动开发）方式\n- 所有测试通过（18/18）\n- 模块化设计，不影响现有功能\n- 完整的类型定义和错误处理\n\n## 文件变更\n\n### 新增文件\n- src/modules/call-record/* （完整的 CallRecord 模块）\n- src/modules/plugin-data/plugin-data.service.integration.spec.ts\n- CALL_RECORD_IMPLEMENTATION.md（实现方案文档）\n\n### 修改文件\n- src/modules/plugin-data/plugin-data.service.ts（重写核心逻辑）\n- src/modules/websocket/websocket.gateway.ts（新增事件）\n- src/app.module.ts（注册新模块）\n- package.json（修复 Jest 配置）\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(chmod:*)",
-      "Bash(docker ps:*)"
+      "Bash(docker ps:*)",
+      "Bash(PGPASSWORD=\"ServBay.dev\" psql:*)"
     ]
   }
 }

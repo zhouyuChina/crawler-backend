@@ -21,7 +21,13 @@ export class ScreenshotController {
     const filepath = path.join(this.uploadPath, folder, filename);
 
     if (!fs.existsSync(filepath)) {
-      throw new NotFoundException('File not found');
+      return res.status(200).json({
+        success: false,
+        statusCode: 404,
+        message: 'File not found',
+        timestamp: new Date().toISOString(),
+        path: `/api/files/${folder}/${filename}`,
+      });
     }
 
     res.sendFile(filepath);

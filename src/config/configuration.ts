@@ -9,7 +9,7 @@ export default () => ({
     database: process.env.DB_DATABASE || 'crm_db',
     entities: [__dirname + '/../**/*.entity{.ts,.js}'],
     synchronize: process.env.NODE_ENV !== 'production',
-    logging: process.env.NODE_ENV === 'development',
+    logging: process.env.DB_LOGGING === 'true',
   },
   upload: {
     dest: process.env.UPLOAD_PATH || './uploads',

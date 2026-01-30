@@ -29,9 +29,13 @@ export class CallRecordController {
       await this.callRecordService.findLatestByType(recordType);
 
     if (!record) {
-      throw new NotFoundException(
-        `No records found for type: ${recordType}`,
-      );
+      return {
+        success: false,
+        statusCode: 404,
+        message: `No records found for type: ${recordType}`,
+        timestamp: new Date().toISOString(),
+        path: `/api/call-records/latest/${recordType}`,
+      };
     }
 
     return record;
@@ -42,7 +46,13 @@ export class CallRecordController {
     const record = await this.callRecordService.findOne(id);
 
     if (!record) {
-      throw new NotFoundException(`Record with ID ${id} not found`);
+      return {
+        success: false,
+        statusCode: 404,
+        message: `Record with ID ${id} not found`,
+        timestamp: new Date().toISOString(),
+        path: `/api/call-records/${id}`,
+      };
     }
 
     return record;
