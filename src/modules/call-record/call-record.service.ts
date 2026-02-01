@@ -33,14 +33,11 @@ export class CallRecordService {
 
   /**
    * 查询列表（分页）
-   * 只返回 statusCode 为 200 的成功记录
    */
   async findAll(dto: QueryCallRecordDto) {
     const { page = 1, limit = 10, recordType, startDate, endDate } = dto;
 
-    const where: any = {
-      statusCode: 200, // 只查询成功的记录
-    };
+    const where: any = {};
 
     if (recordType) {
       where.recordType = recordType;
@@ -79,14 +76,10 @@ export class CallRecordService {
 
   /**
    * 查询最新记录（按类型）
-   * 只返回 statusCode 为 200 的成功记录
    */
   async findLatestByType(recordType: string): Promise<CallRecord | null> {
     return await this.callRecordRepository.findOne({
-      where: {
-        recordType,
-        statusCode: 200, // 只查询成功的记录
-      },
+      where: { recordType },
       order: { createdAt: 'DESC' },
     });
   }
