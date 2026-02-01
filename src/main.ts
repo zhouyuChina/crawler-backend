@@ -26,8 +26,14 @@ async function bootstrap() {
   );
 
   app.enableCors({
-    origin: process.env.CORS_ORIGIN || '*',
+    origin: (origin, callback) => {
+      // 允许所有来源（包括内网穿透域名）
+      // 当 credentials: true 时，不能使用 '*'，需要动态返回请求的 origin
+      callback(null, true);
+    },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Cookie', 'X-Requested-With'],
   });
 
   app.useGlobalPipes(

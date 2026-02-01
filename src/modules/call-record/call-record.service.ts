@@ -221,18 +221,21 @@ export class CallRecordService {
 
   /**
    * 定时任务：每秒检查并更新通话状态
+   * 只处理通话记录（get_curcall_in, get_curcall_out），不处理状态记录
    */
   @Cron('*/1 * * * * *') // 每秒执行
   async updateCallStatus(): Promise<void> {
     const threeSecondsAgo = new Date(Date.now() - 3000);
 
-    // 查找超过 3 秒未更新的 active 记录
-    const expiredRecords = await this.callRecordRepository.find({
-      where: {
-        status: 'active',
-        lastUpdateTime: LessThan(threeSecondsAgo),
-      },
-    });
+    // 查找超过 3 秒未更新的 active 通话记录（只处理通话类型）
+    const expiredRecords = await this.callRecordRepository
+      .createQueryBuilder('record')
+      .where('record.status = :status', { status: 'active' })
+      .andWhere('record.lastUpdateTime < :threeSecondsAgo', { threeSecondsAgo })
+      .andWhere('record.recordType IN (:...callTypes)', {
+        callTypes: ['get_curcall_in', 'get_curcall_out'],
+      })
+      .getMany();
 
     if (expiredRecords.length === 0) {
       return;
@@ -262,19 +265,31 @@ export class CallRecordService {
 
   /**
    * 定时任务：每 10 秒清理已结束的通话
+   * 已禁用：保留所有记录到数据库，不自动删除
    */
-  @Cron('*/10 * * * * *') // 每 10 秒执行
+  // @Cron('*/10 * * * * *') // 已禁用
   async cleanupEndedCalls(): Promise<void> {
+    // 已禁用自动清理功能
+    // 所有通话记录将永久保存在数据库中
+    return;
+
+    /* 原始清理逻辑（已禁用）
     const sixtySecondsAgo = new Date(Date.now() - 60000);
 
-    // 删除超过 60 秒的已结束通话
-    const result = await this.callRecordRepository.delete({
-      status: 'ended',
-      lastUpdateTime: LessThan(sixtySecondsAgo),
-    });
+    // 删除超过 60 秒的已结束通话（只删除通话类型）
+    const result = await this.callRecordRepository
+      .createQueryBuilder()
+      .delete()
+      .where('status = :status', { status: 'ended' })
+      .andWhere('lastUpdateTime < :sixtySecondsAgo', { sixtySecondsAgo })
+      .andWhere('recordType IN (:...callTypes)', {
+        callTypes: ['get_curcall_in', 'get_curcall_out'],
+      })
+      .execute();
 
     if (result.affected && result.affected > 0) {
       console.log(`🗑️ 清理了 ${result.affected} 条已结束的通话记录`);
     }
+    */
   }
 }

@@ -11,9 +11,12 @@ import { Logger } from '@nestjs/common';
 
 @WebSocketGateway({
   cors: {
-    origin: '*',
+    origin: true, // 允许所有来源（动态返回请求的 origin）
+    credentials: true,
+    methods: ['GET', 'POST'],
   },
   namespace: '/ws',
+  transports: ['websocket', 'polling'], // 支持 websocket 和轮询两种方式
 })
 export class WebsocketGateway
   implements OnGatewayConnection, OnGatewayDisconnect

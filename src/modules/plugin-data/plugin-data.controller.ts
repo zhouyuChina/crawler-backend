@@ -6,13 +6,11 @@ import {
   UseInterceptors,
   BadRequestException,
   Req,
-  Headers,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ConfigService } from '@nestjs/config';
 import { PluginDataService } from './plugin-data.service';
 import { PluginSubmitDto } from './dto/plugin-submit.dto';
-import { BrowserRequestDto } from './dto/browser-request.dto';
 import { ProxyRequestDto } from './dto/proxy-request.dto';
 import type { Request } from 'express';
 
@@ -82,8 +80,17 @@ export class PluginDataController {
       if (Array.isArray(body.requestHeaders)) {
         body.requestHeaders.forEach((header: { name: string; value: string }) => {
           headers[header.name] = header.value;
+
+          // 特别记录 Cookie 的传递
+          if (header.name.toLowerCase() === 'cookie') {
+            console.log('🍪 [Controller] 收到 Cookie:');
+            console.log('   长度:', header.value.length, '字符');
+            console.log('   前100字符:', header.value.substring(0, 100));
+            console.log('   Cookie数量:', header.value.split(';').length, '个');
+          }
         });
         console.log('✅ 已转换请求头格式，共', body.requestHeaders.length, '个');
+        console.log('📋 [Controller] 转换后的 headers 对象包含的键:', Object.keys(headers).join(', '));
       }
 
       // 调用代理请求服务
