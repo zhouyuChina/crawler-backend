@@ -32,7 +32,8 @@ export class CallRecordController {
       return {
         success: false,
         statusCode: 404,
-        message: `No records found for type: ${recordType}`,
+        message: `暂无可用数据。可能原因：1) 尚未收到该类型的请求 2) 最近的请求返回了错误（401/403）`,
+        recordType,
         timestamp: new Date().toISOString(),
         path: `/api/call-records/latest/${recordType}`,
       };
