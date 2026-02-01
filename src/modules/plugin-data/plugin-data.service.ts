@@ -24,6 +24,15 @@ export class PluginDataService {
   // 需要变更检测的类型
   private readonly CHANGE_DETECTION_TYPES = ['get_peer_status', 'cont_controler'];
 
+  // 请求去重缓存：URL -> { timestamp, result }
+  private readonly recentRequests = new Map<
+    string,
+    { timestamp: number; result: any }
+  >();
+
+  // 去重时间窗口（毫秒）
+  private readonly DEDUP_WINDOW_MS = 2000;
+
   constructor(
     private readonly webpageService: WebpageService,
     private readonly screenshotService: ScreenshotService,
@@ -79,6 +88,13 @@ export class PluginDataService {
       };
     }
 
+    // 1.5 去重检查：如果同一 URL 在短时间内已成功处理，跳过
+    const dedupResult = this.checkAndCacheRequest(dto.url);
+    if (dedupResult) {
+      console.log('⏭️ [去重] 请求已在近期处理过，跳过:', dto.url);
+      return dedupResult;
+    }
+
     console.log(`✅ 识别为 ${recordType} 类型请求`);
 
     // 2. 广播请求接收事件
@@ -105,7 +121,28 @@ export class PluginDataService {
       if (this.needsChangeDetection(recordType)) {
         console.log(`🔍 ${recordType} 需要变更检测`);
 
-        const { changed, hash } = await this.callRecordService.hasDataChanged(
+        // 🔥 新增：如果响应码不是 200，不保存到数据库，只推送错误信息
+        if (responseData.statusCode !== 200) {
+          console.log(`⚠️ 响应码 ${responseData.statusCode}，跳过保存到数据库`);
+
+          this.websocketGateway.broadcastRequestProcessed({
+            id: requestId,
+            url: dto.url,
+            method: dto.method,
+            status: 'error',
+            message: `目标网站返回错误: ${responseData.statusCode}`,
+            statusCode: responseData.statusCode,
+            responseBody,
+          });
+
+          return {
+            success: false,
+            message: `目标网站返回错误: ${responseData.statusCode}`,
+            statusCode: responseData.statusCode,
+          };
+        }
+
+        const { changed } = await this.callRecordService.hasDataChanged(
           recordType,
           responseBody,
         );
@@ -195,13 +232,15 @@ export class PluginDataService {
           statusCode: responseData.statusCode,
         });
 
-        return {
+        const result = {
           success: true,
           message: '通话记录已保存',
           recordId: callRecord.id,
           recordType: callRecord.recordType,
           changed: true,
         };
+        this.cacheSuccessfulRequest(dto.url, result);
+        return result;
       } else {
         // get_curcall_in 和 get_curcall_out：使用 UPSERT
         console.log(`🔄 ${recordType} 使用 UPSERT 策略`);
@@ -265,12 +304,14 @@ export class PluginDataService {
           statusCode: responseData.statusCode,
         });
 
-        return {
+        const result = {
           success: true,
           message: '通话记录已更新',
           recordId: callRecord.id,
           recordType: callRecord.recordType,
         };
+        this.cacheSuccessfulRequest(dto.url, result);
+        return result;
       }
     } catch (error) {
       // 错误处理
@@ -501,6 +542,72 @@ export class PluginDataService {
   }
 
   /**
+   * 检查请求是否在去重窗口内，如果是则返回缓存结果
+   * 如果不是，则缓存当前请求（稍后由 cacheSuccessfulRequest 更新结果）
+   */
+  private checkAndCacheRequest(url: string): any | null {
+    const now = Date.now();
+
+    // 清理过期的缓存
+    this.cleanExpiredCache();
+
+    // 提取 URL 的基础部分（去掉时间戳参数）
+    const baseUrl = this.normalizeUrl(url);
+
+    const cached = this.recentRequests.get(baseUrl);
+    if (cached && now - cached.timestamp < this.DEDUP_WINDOW_MS) {
+      // 在去重窗口内，返回缓存的结果
+      return {
+        ...cached.result,
+        deduplicated: true,
+        message: '请求已去重（近期已处理）',
+      };
+    }
+
+    return null;
+  }
+
+  /**
+   * 缓存成功的请求结果
+   */
+  private cacheSuccessfulRequest(url: string, result: any): void {
+    const baseUrl = this.normalizeUrl(url);
+    this.recentRequests.set(baseUrl, {
+      timestamp: Date.now(),
+      result,
+    });
+  }
+
+  /**
+   * 标准化 URL（去掉时间戳等动态参数）
+   */
+  private normalizeUrl(url: string): string {
+    try {
+      const urlObj = new URL(url);
+      // 移除常见的时间戳参数
+      urlObj.searchParams.delete('date');
+      urlObj.searchParams.delete('timestamp');
+      urlObj.searchParams.delete('t');
+      urlObj.searchParams.delete('_');
+      return urlObj.toString();
+    } catch {
+      return url;
+    }
+  }
+
+  /**
+   * 清理过期的缓存
+   */
+  private cleanExpiredCache(): void {
+    const now = Date.now();
+    for (const [key, value] of this.recentRequests.entries()) {
+      if (now - value.timestamp > this.DEDUP_WINDOW_MS * 2) {
+        this.recentRequests.delete(key);
+      }
+    }
+  }
+
+  /**
    * 发起 HTTP/HTTPS 请求
    */
   private makeHttpRequest(
@@ -520,12 +627,38 @@ export class PluginDataService {
         timeout: 30000, // 30 秒超时
       };
 
+      // 记录即将发送的请求信息
+      console.log('🌐 [Service] 准备发起 HTTP 请求:');
+      console.log('   目标URL:', dto.url);
+      console.log('   协议:', isHttps ? 'HTTPS' : 'HTTP');
+      console.log('   方法:', dto.method || 'GET');
+      console.log('   请求头数量:', Object.keys(dto.headers || {}).length);
+
+      // 特别记录 Cookie
+      if (dto.headers && dto.headers['Cookie']) {
+        console.log('🍪 [Service] 即将发送 Cookie 到目标网站:');
+        console.log('   长度:', dto.headers['Cookie'].length, '字符');
+        console.log('   前100字符:', dto.headers['Cookie'].substring(0, 100));
+        console.log('   Cookie数量:', dto.headers['Cookie'].split(';').length, '个');
+      } else if (dto.headers && dto.headers['cookie']) {
+        console.log('🍪 [Service] 即将发送 cookie (小写) 到目标网站:');
+        console.log('   长度:', dto.headers['cookie'].length, '字符');
+        console.log('   前100字符:', dto.headers['cookie'].substring(0, 100));
+      } else {
+        console.log('⚠️  [Service] 警告: 请求头中没有找到 Cookie!');
+        console.log('   请求头键名列表:', Object.keys(dto.headers || {}).join(', '));
+      }
+
       // 设置 Content-Type
       if (dto.contentType && dto.body) {
         options.headers['Content-Type'] = dto.contentType;
       }
 
       const req = client.request(options, (res) => {
+        console.log('📨 [Service] 收到目标网站响应:');
+        console.log('   状态码:', res.statusCode);
+        console.log('   响应头:', JSON.stringify(res.headers).substring(0, 200));
+
         let body = '';
 
         res.on('data', (chunk) => {
@@ -533,6 +666,10 @@ export class PluginDataService {
         });
 
         res.on('end', () => {
+          console.log('✅ [Service] 响应接收完成:');
+          console.log('   响应体长度:', body.length, '字符');
+          console.log('   响应体前200字符:', body.substring(0, 200));
+
           resolve({
             statusCode: res.statusCode || 0,
             headers: res.headers,
