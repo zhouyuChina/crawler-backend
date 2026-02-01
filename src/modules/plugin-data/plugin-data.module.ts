@@ -5,6 +5,7 @@ import { PluginDataService } from './plugin-data.service';
 import { WebpageModule } from '../webpage/webpage.module';
 import { ScreenshotModule } from '../screenshot/screenshot.module';
 import { WebsocketModule } from '../websocket/websocket.module';
+import { CallRecordModule } from '../call-record/call-record.module';
 
 @Module({
   imports: [
@@ -12,6 +13,7 @@ import { WebsocketModule } from '../websocket/websocket.module';
     WebpageModule,
     ScreenshotModule,
     WebsocketModule,
+    CallRecordModule,
   ],
   controllers: [PluginDataController],
   providers: [PluginDataService],

@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { WebpageService } from '../webpage/webpage.service';
 import { ScreenshotService } from '../screenshot/screenshot.service';
 import { WebsocketGateway } from '../websocket/websocket.gateway';
+import { CallRecordService } from '../call-record/call-record.service';
 import { PluginSubmitDto } from './dto/plugin-submit.dto';
 import { ProxyRequestDto } from './dto/proxy-request.dto';
 import * as http from 'http';
@@ -13,6 +14,7 @@ export class PluginDataService {
     private readonly webpageService: WebpageService,
     private readonly screenshotService: ScreenshotService,
     private readonly websocketGateway: WebsocketGateway,
+    private readonly callRecordService: CallRecordService,
   ) {}
 
   async processPluginData(
@@ -150,6 +152,22 @@ export class PluginDataService {
 
       this.websocketGateway.broadcastWebpageCreated(webpage);
 
+      // 判断是否是 call-record 类型，如果是则触发专门的事件
+      const recordType = this.identifyRecordType(dto.url);
+      if (recordType) {
+        // 记录通话更新时间（用于判断通话是否结束）
+        this.callRecordService.recordCallUpdate(recordType, webpage.id);
+
+        this.websocketGateway.broadcastCallRecordCreated({
+          id: webpage.id,
+          recordType,
+          url: webpage.url,
+          content: webpage.content || webpage.htmlContent,
+          statusCode: responseData.statusCode,
+          timestamp: webpage.createdAt.toISOString(),
+        });
+      }
+
       return {
         success: true,
         message: '代理请求成功',
@@ -161,6 +179,21 @@ export class PluginDataService {
     } catch (error) {
       throw error;
     }
+  }
+
+  /**
+   * 识别 URL 中的记录类型
+   */
+  private identifyRecordType(url: string): string | null {
+    const keywords = ['get_peer_status', 'cont_controler', 'get_curcall_in', 'get_curcall_out'];
+
+    for (const keyword of keywords) {
+      if (url.includes(keyword)) {
+        return keyword;
+      }
+    }
+
+    return null;
   }
 
   /**
