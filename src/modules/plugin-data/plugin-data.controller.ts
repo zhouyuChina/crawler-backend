@@ -80,17 +80,8 @@ export class PluginDataController {
       if (Array.isArray(body.requestHeaders)) {
         body.requestHeaders.forEach((header: { name: string; value: string }) => {
           headers[header.name] = header.value;
-
-          // 特别记录 Cookie 的传递
-          if (header.name.toLowerCase() === 'cookie') {
-            console.log('🍪 [Controller] 收到 Cookie:');
-            console.log('   长度:', header.value.length, '字符');
-            console.log('   前100字符:', header.value.substring(0, 100));
-            console.log('   Cookie数量:', header.value.split(';').length, '个');
-          }
         });
         console.log('✅ 已转换请求头格式，共', body.requestHeaders.length, '个');
-        console.log('📋 [Controller] 转换后的 headers 对象包含的键:', Object.keys(headers).join(', '));
       }
 
       // 调用代理请求服务
@@ -103,9 +94,11 @@ export class PluginDataController {
       });
     }
 
-    // 如果是 JSON 格式（旧格式）
-    console.log('✅ 识别为 JSON 格式（旧格式）');
-    return this.pluginDataService.processBrowserRequest(body);
+    // 其他格式，返回错误
+    return {
+      success: false,
+      message: '不支持的请求格式',
+    };
   }
 
   @Post('proxy')

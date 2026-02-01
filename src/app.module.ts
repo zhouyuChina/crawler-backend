@@ -12,7 +12,6 @@ import { WebsocketModule } from './modules/websocket/websocket.module';
 import { StatisticsModule } from './modules/statistics/statistics.module';
 import { StorageModule } from './modules/storage/storage.module';
 import { MonitorModule } from './modules/monitor/monitor.module';
-import { CallRecordModule } from './modules/call-record/call-record.module';
 import { LoggerMiddleware } from './common/middleware/logger.middleware';
 
 @Module({
@@ -44,7 +43,6 @@ import { LoggerMiddleware } from './common/middleware/logger.middleware';
     StatisticsModule,
     StorageModule,
     MonitorModule,
-    CallRecordModule,
   ],
   controllers: [AppController],
   providers: [AppService],
