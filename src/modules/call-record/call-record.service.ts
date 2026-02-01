@@ -21,6 +21,9 @@ export class CallRecordService {
   // 记录最后更新时间
   private lastUpdateTimes = new Map<string, Date>();
 
+  // 记录每种类型的最新内容（用于去重）
+  private lastRecordContents = new Map<string, string>();
+
   constructor(
     @InjectRepository(Webpage)
     private webpageRepository: Repository<Webpage>,
@@ -83,6 +86,30 @@ export class CallRecordService {
   recordCallUpdate(recordType: string, webpageId: string) {
     const key = `${recordType}:${webpageId}`;
     this.lastUpdateTimes.set(key, new Date());
+  }
+
+  /**
+   * 判断是否应该广播此记录（去重逻辑）
+   * @param recordType 记录类型
+   * @param content 记录内容
+   * @param webpageId 当前记录 ID
+   * @returns true 表示应该广播，false 表示重复跳过
+   */
+  async shouldBroadcastRecord(
+    recordType: string,
+    content: string,
+    webpageId: string,
+  ): Promise<boolean> {
+    const lastContent = this.lastRecordContents.get(recordType);
+
+    // 如果内容与上次相同，则跳过广播
+    if (lastContent === content) {
+      return false;
+    }
+
+    // 更新最新内容
+    this.lastRecordContents.set(recordType, content);
+    return true;
   }
 
   /**

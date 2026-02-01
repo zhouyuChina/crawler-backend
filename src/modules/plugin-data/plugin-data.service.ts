@@ -158,14 +158,25 @@ export class PluginDataService {
         // 记录通话更新时间（用于判断通话是否结束）
         this.callRecordService.recordCallUpdate(recordType, webpage.id);
 
-        this.websocketGateway.broadcastCallRecordCreated({
-          id: webpage.id,
+        // 检查是否与最新记录重复
+        const shouldBroadcast = await this.callRecordService.shouldBroadcastRecord(
           recordType,
-          url: webpage.url,
-          content: webpage.content || webpage.htmlContent,
-          statusCode: responseData.statusCode,
-          timestamp: webpage.createdAt.toISOString(),
-        });
+          webpage.content || webpage.htmlContent,
+          webpage.id,
+        );
+
+        if (shouldBroadcast) {
+          this.websocketGateway.broadcastCallRecordCreated({
+            id: webpage.id,
+            recordType,
+            url: webpage.url,
+            content: webpage.content || webpage.htmlContent,
+            statusCode: responseData.statusCode,
+            timestamp: webpage.createdAt.toISOString(),
+          });
+        } else {
+          console.log(`⏭️  跳过重复记录推送: ${recordType} (${webpage.id})`);
+        }
       }
 
       return {
