@@ -31,7 +31,34 @@ export class CallRecordService {
   ) {}
 
   /**
-   * 查询列表（分页）
+   * 从 HTML 内容中提取被叫号码
+   */
+  private extractCalledNumber(htmlContent: string): string | null {
+    if (!htmlContent) return null;
+
+    // 匹配 HTML 表格中的被叫号码（第二个 <td> 标签中的内容）
+    // 示例：<td align="center">0402117300</td>
+    const rows = htmlContent.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi);
+    if (!rows || rows.length < 2) return null;
+
+    // 跳过表头，从第二行开始（第一个数据行）
+    const dataRow = rows[1];
+    const cells = dataRow.match(/<td[^>]*>([\s\S]*?)<\/td>/gi);
+
+    if (cells && cells.length >= 2) {
+      // 第二个 <td> 是被叫号码
+      const calledNumberCell = cells[1];
+      const numberMatch = calledNumberCell.match(/>([^<]+)</);
+      if (numberMatch && numberMatch[1]) {
+        return numberMatch[1].trim();
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * 查询列表（分页）- 按被叫号码去重，只保留最新记录
    */
   async findAll(params: {
     page: number;
@@ -40,7 +67,7 @@ export class CallRecordService {
   }) {
     const { page, limit, recordType } = params;
 
-    // 构建查询条件
+    // 第一步：查询所有符合条件的记录
     const queryBuilder = this.webpageRepository.createQueryBuilder('webpage');
 
     // 如果指定了 recordType，按 URL 关键词过滤
@@ -56,16 +83,35 @@ export class CallRecordService {
       { excludeText: '%無任何通話記錄%' },
     );
 
-    // 排序和分页
-    queryBuilder
-      .orderBy('webpage.createdAt', 'DESC')
-      .skip((page - 1) * limit)
-      .take(limit);
+    // 按创建时间倒序排列（最新的在前）
+    queryBuilder.orderBy('webpage.createdAt', 'DESC');
 
-    const [items, total] = await queryBuilder.getManyAndCount();
+    const allItems = await queryBuilder.getMany();
+
+    // 第二步：按被叫号码去重，保留每个号码的最新记录
+    const uniqueRecordsMap = new Map<string, any>();
+
+    for (const item of allItems) {
+      const content = item.htmlContent || item.content || '';
+      const calledNumber = this.extractCalledNumber(content);
+
+      // 如果提取到被叫号码，且该号码还未记录，则保存（因为已按时间倒序，第一次出现的就是最新的）
+      if (calledNumber && !uniqueRecordsMap.has(calledNumber)) {
+        uniqueRecordsMap.set(calledNumber, item);
+      }
+    }
+
+    // 转换为数组
+    const uniqueItems = Array.from(uniqueRecordsMap.values());
+
+    // 第三步：分页
+    const total = uniqueItems.length;
+    const startIndex = (page - 1) * limit;
+    const endIndex = startIndex + limit;
+    const paginatedItems = uniqueItems.slice(startIndex, endIndex);
 
     return {
-      items,
+      items: paginatedItems,
       total,
       page,
       limit,
