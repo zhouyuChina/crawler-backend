@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Like, MoreThan } from 'typeorm';
+import { Repository, Like } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
 import { Webpage } from '../webpage/entities/webpage.entity';
 import { WebsocketGateway } from '../websocket/websocket.gateway';
@@ -39,19 +39,30 @@ export class CallRecordService {
     recordType?: string;
   }) {
     const { page, limit, recordType } = params;
-    const where: any = {};
+
+    // 构建查询条件
+    const queryBuilder = this.webpageRepository.createQueryBuilder('webpage');
 
     // 如果指定了 recordType，按 URL 关键词过滤
     if (recordType && this.RECORD_TYPE_KEYWORDS[recordType]) {
-      where.url = Like(`%${this.RECORD_TYPE_KEYWORDS[recordType]}%`);
+      queryBuilder.andWhere('webpage.url LIKE :url', {
+        url: `%${this.RECORD_TYPE_KEYWORDS[recordType]}%`,
+      });
     }
 
-    const [items, total] = await this.webpageRepository.findAndCount({
-      where,
-      order: { createdAt: 'DESC' },
-      skip: (page - 1) * limit,
-      take: limit,
-    });
+    // 排除包含 "無任何通話記錄" 的记录
+    queryBuilder.andWhere(
+      '(webpage.content NOT LIKE :excludeText AND webpage.htmlContent NOT LIKE :excludeText) OR (webpage.content IS NULL AND webpage.htmlContent IS NULL)',
+      { excludeText: '%無任何通話記錄%' },
+    );
+
+    // 排序和分页
+    queryBuilder
+      .orderBy('webpage.createdAt', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    const [items, total] = await queryBuilder.getManyAndCount();
 
     return {
       items,

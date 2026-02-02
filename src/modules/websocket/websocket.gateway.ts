@@ -104,7 +104,6 @@ export class WebsocketGateway
     this.server.emit('call-record:created', data);
     this.logger.log(`广播通话记录创建: ${data.recordType}`);
   }
-  }
 
   // 广播数据变更事件
   broadcastDataChanged(data: {
