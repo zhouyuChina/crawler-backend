@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API 接口测试</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: linear-gradient(135deg, #1e3a5f 0%, #0f2027 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #e0e0e0;
+        }
+
+        .container { max-width: 1400px; margin: 0 auto; }
+
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 24px;
+            font-size: 2em;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .panel {
+            background: #1a2332;
+            border-radius: 10px;
+            padding: 20px;
+            border: 1px solid #2a3a4a;
+        }
+
+        .panel-title {
+            font-size: 1.1em;
+            font-weight: bold;
+            color: #60a5fa;
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #2a3a4a;
+        }
+
+        /* Connection status */
+        .connection-bar {
+            background: #1a2332;
+            border-radius: 10px;
+            padding: 12px 20px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border: 1px solid #2a3a4a;
+        }
+
+        .status-dot {
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            background: #ef4444;
+        }
+
+        .status-dot.connected { background: #10b981; }
+
+        /* API test section */
+        .api-group {
+            margin-bottom: 16px;
+            padding: 12px;
+            background: #0f1923;
+            border-radius: 8px;
+        }
+
+        .api-group:last-child { margin-bottom: 0; }
+
+        .api-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .method-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75em;
+            font-weight: bold;
+            color: white;
+            background: #3b82f6;
+        }
+
+        .api-path {
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            color: #93c5fd;
+        }
+
+        .api-controls {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 8px;
+        }
+
+        .api-controls select,
+        .api-controls input {
+            background: #1a2332;
+            border: 1px solid #2a3a4a;
+            color: #e0e0e0;
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-size: 0.85em;
+        }
+
+        .api-controls select:focus,
+        .api-controls input:focus {
+            outline: none;
+            border-color: #60a5fa;
+        }
+
+        .btn {
+            padding: 6px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85em;
+            font-weight: 500;
+            transition: opacity 0.2s;
+        }
+
+        .btn:hover { opacity: 0.85; }
+        .btn:active { transform: scale(0.97); }
+
+        .btn-primary { background: #3b82f6; color: white; }
+        .btn-danger { background: #ef4444; color: white; }
+        .btn-secondary { background: #4b5563; color: white; }
+
+        .result-box {
+            background: #0a1018;
+            border: 1px solid #2a3a4a;
+            border-radius: 6px;
+            padding: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.8em;
+            max-height: 250px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+            color: #a3e635;
+            display: none;
+        }
+
+        .result-box.show { display: block; }
+
+        .result-box.error { color: #fb7185; }
+
+        /* WebSocket events */
+        .event-log {
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        .event-item {
+            padding: 10px;
+            border-bottom: 1px solid #1a2332;
+            animation: fadeIn 0.3s ease-out;
+        }
+
+        .event-item:last-child { border-bottom: none; }
+
+        .event-name {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75em;
+            font-weight: bold;
+            margin-right: 8px;
+        }
+
+        .event-name.call-record { background: #7c3aed; color: white; }
+        .event-name.call-status { background: #f59e0b; color: white; }
+        .event-name.webpage { background: #10b981; color: white; }
+        .event-name.other { background: #6b7280; color: white; }
+
+        .event-time {
+            font-size: 0.8em;
+            color: #6b7280;
+        }
+
+        .event-data {
+            background: #0a1018;
+            border-radius: 4px;
+            padding: 8px;
+            margin-top: 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.78em;
+            color: #93c5fd;
+            max-height: 150px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #4b5563;
+        }
+
+        .event-count {
+            font-size: 0.85em;
+            color: #6b7280;
+            float: right;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0f1923; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb { background: #2a3a4a; border-radius: 3px; }
+
+        @media (max-width: 900px) {
+            .layout { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>API 接口测试</h1>
+
+        <div class="connection-bar">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">WebSocket 连接中...</span>
+        </div>
+
+        <div class="layout">
+            <!-- Left: HTTP API tests -->
+            <div>
+                <div class="panel">
+                    <div class="panel-title">HTTP 接口测试</div>
+
+                    <!-- Call Records List -->
+                    <div class="api-group">
+                        <div class="api-header">
+                            <span class="method-badge">GET</span>
+                            <span class="api-path">/api/call-records</span>
+                        </div>
+                        <div class="api-controls">
+                            <select id="cr-type">
+                                <option value="">全部类型</option>
+                                <option value="get_curcall_in">get_curcall_in</option>
+                                <option value="get_curcall_out">get_curcall_out</option>
+                                <option value="get_peer_status">get_peer_status</option>
+                                <option value="cont_controler">cont_controler</option>
+                            </select>
+                            <input type="number" id="cr-page" value="1" min="1" style="width:60px" placeholder="page">
+                            <input type="number" id="cr-limit" value="20" min="1" style="width:60px" placeholder="limit">
+                            <button class="btn btn-primary" onclick="fetchCallRecords()">Send</button>
+                        </div>
+                        <div class="result-box" id="cr-result"></div>
+                    </div>
+
+                    <!-- Call Records Latest -->
+                    <div class="api-group">
+                        <div class="api-header">
+                            <span class="method-badge">GET</span>
+                            <span class="api-path">/api/call-records/latest/:recordType</span>
+                        </div>
+                        <div class="api-controls">
+                            <select id="crl-type">
+                                <option value="get_curcall_in">get_curcall_in</option>
+                                <option value="get_curcall_out">get_curcall_out</option>
+                                <option value="get_peer_status">get_peer_status</option>
+                                <option value="cont_controler">cont_controler</option>
+                            </select>
+                            <button class="btn btn-primary" onclick="fetchLatestCallRecord()">Send</button>
+                        </div>
+                        <div class="result-box" id="crl-result"></div>
+                    </div>
+
+                    <!-- Webpage List -->
+                    <div class="api-group">
+                        <div class="api-header">
+                            <span class="method-badge">GET</span>
+                            <span class="api-path">/api/webpage</span>
+                        </div>
+                        <div class="api-controls">
+                            <input type="number" id="wp-page" value="1" min="1" style="width:60px" placeholder="page">
+                            <input type="number" id="wp-limit" value="10" min="1" style="width:60px" placeholder="limit">
+                            <button class="btn btn-primary" onclick="fetchWebpages()">Send</button>
+                        </div>
+                        <div class="result-box" id="wp-result"></div>
+                    </div>
+
+                    <!-- Statistics -->
+                    <div class="api-group">
+                        <div class="api-header">
+                            <span class="method-badge">GET</span>
+                            <span class="api-path">/api/statistics/overview</span>
+                        </div>
+                        <div class="api-controls">
+                            <button class="btn btn-primary" onclick="fetchStatistics()">Send</button>
+                        </div>
+                        <div class="result-box" id="stats-result"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right: WebSocket events -->
+            <div>
+                <div class="panel">
+                    <div class="panel-title">
+                        WebSocket 事件监听
+                        <span class="event-count" id="eventCount">0 events</span>
+                    </div>
+                    <div style="margin-bottom: 12px;">
+                        <button class="btn btn-danger" onclick="clearEvents()">Clear</button>
+                    </div>
+                    <div class="event-log" id="eventLog">
+                        <div class="empty-state">等待事件...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = `${window.location.origin}/api`;
+        let socket;
+        let events = [];
+
+        // --- HTTP API calls ---
+
+        async function apiFetch(url, resultId) {
+            const box = document.getElementById(resultId);
+            box.classList.remove('error');
+            box.classList.add('show');
+            box.textContent = 'Loading...';
+
+            try {
+                const res = await fetch(url);
+                const data = await res.json();
+                box.textContent = JSON.stringify(data, null, 2);
+                if (!data.success) box.classList.add('error');
+            } catch (e) {
+                box.textContent = 'Error: ' + e.message;
+                box.classList.add('error');
+            }
+        }
+
+        function fetchCallRecords() {
+            const type = document.getElementById('cr-type').value;
+            const page = document.getElementById('cr-page').value;
+            const limit = document.getElementById('cr-limit').value;
+            let url = `${API_BASE}/call-records?page=${page}&limit=${limit}`;
+            if (type) url += `&recordType=${type}`;
+            apiFetch(url, 'cr-result');
+        }
+
+        function fetchLatestCallRecord() {
+            const type = document.getElementById('crl-type').value;
+            apiFetch(`${API_BASE}/call-records/latest/${type}`, 'crl-result');
+        }
+
+        function fetchWebpages() {
+            const page = document.getElementById('wp-page').value;
+            const limit = document.getElementById('wp-limit').value;
+            apiFetch(`${API_BASE}/webpage?page=${page}&limit=${limit}`, 'wp-result');
+        }
+
+        function fetchStatistics() {
+            apiFetch(`${API_BASE}/statistics/overview`, 'stats-result');
+        }
+
+        // --- WebSocket ---
+
+        function connectWebSocket() {
+            const wsUrl = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
+
+            socket = io(wsUrl, { transports: ['websocket', 'polling'] });
+
+            socket.on('connect', () => updateConnectionStatus(true));
+            socket.on('disconnect', () => updateConnectionStatus(false));
+            socket.on('connect_error', () => updateConnectionStatus(false));
+
+            const watchEvents = [
+                'call-record:created',
+                'call-record:updated',
+                'call-status:changed',
+                'webpage:created',
+                'webpage:deleted',
+                'request:received',
+                'request:processed',
+                'statistics:updated',
+                'data:changed',
+            ];
+
+            watchEvents.forEach(eventName => {
+                socket.on(eventName, data => addEvent(eventName, data));
+            });
+        }
+
+        function updateConnectionStatus(connected) {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            if (connected) {
+                dot.classList.add('connected');
+                text.textContent = 'WebSocket 已连接';
+            } else {
+                dot.classList.remove('connected');
+                text.textContent = 'WebSocket 未连接';
+            }
+        }
+
+        function getEventClass(name) {
+            if (name.startsWith('call-record')) return 'call-record';
+            if (name.startsWith('call-status')) return 'call-status';
+            if (name.startsWith('webpage')) return 'webpage';
+            return 'other';
+        }
+
+        function escapeHtml(text) {
+            const d = document.createElement('div');
+            d.textContent = text;
+            return d.innerHTML;
+        }
+
+        function addEvent(name, data) {
+            events.unshift({ name, data, time: new Date() });
+            if (events.length > 200) events.pop();
+            renderEvents();
+        }
+
+        function clearEvents() {
+            events = [];
+            renderEvents();
+        }
+
+        function renderEvents() {
+            document.getElementById('eventCount').textContent = events.length + ' events';
+            const log = document.getElementById('eventLog');
+
+            if (events.length === 0) {
+                log.innerHTML = '<div class="empty-state">等待事件...</div>';
+                return;
+            }
+
+            log.innerHTML = events.map(ev => {
+                const timeStr = ev.time.toLocaleTimeString('zh-CN', { hour12: false, fractionalSecondDigits: 3 });
+                const jsonStr = escapeHtml(JSON.stringify(ev.data, null, 2));
+                return `<div class="event-item">
+                    <span class="event-name ${getEventClass(ev.name)}">${ev.name}</span>
+                    <span class="event-time">${timeStr}</span>
+                    <div class="event-data">${jsonStr}</div>
+                </div>`;
+            }).join('');
+        }
+
+        // Init
+        connectWebSocket();
+    </script>
+</body>
+</html>
