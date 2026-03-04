@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Like } from 'typeorm';
+import { Repository } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
 import { Webpage } from '../webpage/entities/webpage.entity';
 import { WebsocketGateway } from '../websocket/websocket.gateway';
@@ -129,12 +129,18 @@ export class CallRecordService {
       return null;
     }
 
-    return await this.webpageRepository.findOne({
-      where: {
-        url: Like(`%${keyword}%`),
-      },
-      order: { createdAt: 'DESC' },
-    });
+    const queryBuilder = this.webpageRepository.createQueryBuilder('webpage');
+    queryBuilder.where('webpage.url LIKE :url', { url: `%${keyword}%` });
+
+    // 排除包含 "無任何通話記錄" 的记录
+    queryBuilder.andWhere(
+      '(webpage.content NOT LIKE :excludeText AND webpage.htmlContent NOT LIKE :excludeText) OR (webpage.content IS NULL AND webpage.htmlContent IS NULL)',
+      { excludeText: '%無任何通話記錄%' },
+    );
+
+    queryBuilder.orderBy('webpage.createdAt', 'DESC');
+
+    return await queryBuilder.getOne();
   }
 
   /**
@@ -157,6 +163,11 @@ export class CallRecordService {
     content: string,
     webpageId: string,
   ): Promise<boolean> {
+    // 如果内容包含 "無任何通話記錄"，则跳过广播
+    if (content && content.includes('無任何通話記錄')) {
+      return false;
+    }
+
     const lastContent = this.lastRecordContents.get(recordType);
 
     // 如果内容与上次相同，则跳过广播
