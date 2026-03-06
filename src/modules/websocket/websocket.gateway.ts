@@ -54,7 +54,9 @@ export class WebsocketGateway
   }
 
   broadcastWebpageDeleted(webpageId: string) {
-    this.server.to('webpage-updates').emit('webpage:deleted', { id: webpageId });
+    this.server
+      .to('webpage-updates')
+      .emit('webpage:deleted', { id: webpageId });
     this.server.emit('webpage:deleted', { id: webpageId });
   }
 

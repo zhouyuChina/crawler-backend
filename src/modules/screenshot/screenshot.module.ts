@@ -7,7 +7,11 @@ import { ScreenshotController } from './screenshot.controller';
 import { StorageModule } from '../storage/storage.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Screenshot]), StorageModule, ConfigModule],
+  imports: [
+    TypeOrmModule.forFeature([Screenshot]),
+    StorageModule,
+    ConfigModule,
+  ],
   controllers: [ScreenshotController],
   providers: [ScreenshotService],
   exports: [ScreenshotService],

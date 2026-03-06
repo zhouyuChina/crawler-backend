@@ -26,7 +26,8 @@ export class PluginDataController {
     this.allowedMimeTypes = this.configService.get<string[]>(
       'upload.allowedMimeTypes',
     ) || ['image/jpeg', 'image/png', 'image/webp'];
-    this.maxFileSize = this.configService.get<number>('upload.maxFileSize') || 10485760;
+    this.maxFileSize =
+      this.configService.get<number>('upload.maxFileSize') || 10485760;
   }
 
   @Post('submit')
@@ -59,12 +60,18 @@ export class PluginDataController {
     console.log('📥 收到浏览器请求数据');
     console.log('Content-Type:', contentType);
     console.log('Body类型:', typeof body);
-    console.log('Body前100字符:', typeof body === 'string' ? body.substring(0, 100) : JSON.stringify(body).substring(0, 100));
+    console.log(
+      'Body前100字符:',
+      typeof body === 'string'
+        ? body.substring(0, 100)
+        : JSON.stringify(body).substring(0, 100),
+    );
 
     // 如果是 HTML 或纯文本格式
     if (typeof body === 'string') {
       const htmlContent = body;
-      const referer = req.headers['referer'] || req.headers['origin'] || 'unknown';
+      const referer =
+        req.headers['referer'] || req.headers['origin'] || 'unknown';
       console.log('✅ 识别为 HTML/Text 格式');
       return this.pluginDataService.processHtmlContent(htmlContent, referer);
     }
@@ -78,10 +85,16 @@ export class PluginDataController {
       // 转换 requestHeaders 从数组格式到对象格式
       const headers: Record<string, string> = {};
       if (Array.isArray(body.requestHeaders)) {
-        body.requestHeaders.forEach((header: { name: string; value: string }) => {
-          headers[header.name] = header.value;
-        });
-        console.log('✅ 已转换请求头格式，共', body.requestHeaders.length, '个');
+        body.requestHeaders.forEach(
+          (header: { name: string; value: string }) => {
+            headers[header.name] = header.value;
+          },
+        );
+        console.log(
+          '✅ 已转换请求头格式，共',
+          body.requestHeaders.length,
+          '个',
+        );
       }
 
       // 调用代理请求服务

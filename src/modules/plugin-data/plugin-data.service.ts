@@ -159,11 +159,12 @@ export class PluginDataService {
         this.callRecordService.recordCallUpdate(recordType, webpage.id);
 
         // 检查是否与最新记录重复
-        const shouldBroadcast = await this.callRecordService.shouldBroadcastRecord(
-          recordType,
-          webpage.content || webpage.htmlContent,
-          webpage.id,
-        );
+        const shouldBroadcast =
+          await this.callRecordService.shouldBroadcastRecord(
+            recordType,
+            webpage.content || webpage.htmlContent,
+            webpage.id,
+          );
 
         if (shouldBroadcast) {
           this.websocketGateway.broadcastCallRecordCreated({
@@ -196,7 +197,12 @@ export class PluginDataService {
    * 识别 URL 中的记录类型
    */
   private identifyRecordType(url: string): string | null {
-    const keywords = ['get_peer_status', 'cont_controler', 'get_curcall_in', 'get_curcall_out'];
+    const keywords = [
+      'get_peer_status',
+      'cont_controler',
+      'get_curcall_in',
+      'get_curcall_out',
+    ];
 
     for (const keyword of keywords) {
       if (url.includes(keyword)) {

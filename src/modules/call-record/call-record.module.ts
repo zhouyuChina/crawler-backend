@@ -6,10 +6,7 @@ import { Webpage } from '../webpage/entities/webpage.entity';
 import { WebsocketModule } from '../websocket/websocket.module';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([Webpage]),
-    WebsocketModule,
-  ],
+  imports: [TypeOrmModule.forFeature([Webpage]), WebsocketModule],
   controllers: [CallRecordController],
   providers: [CallRecordService],
   exports: [CallRecordService],

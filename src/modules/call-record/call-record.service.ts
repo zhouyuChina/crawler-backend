@@ -60,11 +60,7 @@ export class CallRecordService {
   /**
    * 查询列表（分页）- 按被叫号码去重，只保留最新记录
    */
-  async findAll(params: {
-    page: number;
-    limit: number;
-    recordType?: string;
-  }) {
+  async findAll(params: { page: number; limit: number; recordType?: string }) {
     const { page, limit, recordType } = params;
 
     // 第一步：查询所有符合条件的记录

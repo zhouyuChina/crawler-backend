@@ -198,7 +198,9 @@ describe('PluginDataService - Call Record Integration', () => {
       expect(result.success).toBe(true);
       expect(result.changed).toBe(true);
       expect(mockCallRecordService.create).toHaveBeenCalled();
-      expect(mockWebsocketGateway.broadcastCallRecordCreated).toHaveBeenCalled();
+      expect(
+        mockWebsocketGateway.broadcastCallRecordCreated,
+      ).toHaveBeenCalled();
       expect(mockWebsocketGateway.broadcastDataChanged).toHaveBeenCalled();
     });
 
@@ -252,7 +254,9 @@ describe('PluginDataService - Call Record Integration', () => {
 
       await service.processBrowserRequest(dto);
 
-      expect(mockWebsocketGateway.broadcastCallRecordCreated).toHaveBeenCalledWith(
+      expect(
+        mockWebsocketGateway.broadcastCallRecordCreated,
+      ).toHaveBeenCalledWith(
         expect.objectContaining({
           id: mockRecord.id,
           recordType: mockRecord.recordType,

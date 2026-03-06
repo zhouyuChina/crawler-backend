@@ -11,9 +11,7 @@ export class LoggerMiddleware implements NestMiddleware {
     const startTime = Date.now();
 
     // 记录请求信息
-    this.logger.log(
-      `→ ${method} ${originalUrl} - ${ip} - ${userAgent}`,
-    );
+    this.logger.log(`→ ${method} ${originalUrl} - ${ip} - ${userAgent}`);
 
     // 监听响应完成
     res.on('finish', () => {

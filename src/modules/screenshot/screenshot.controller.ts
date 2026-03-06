@@ -9,7 +9,8 @@ export class ScreenshotController {
   private uploadPath: string;
 
   constructor(private configService: ConfigService) {
-    this.uploadPath = this.configService.get<string>('upload.dest') || './uploads';
+    this.uploadPath =
+      this.configService.get<string>('upload.dest') || './uploads';
   }
 
   @Get(':folder/:filename')

@@ -1,4 +1,10 @@
-import { IsString, IsOptional, IsUrl, IsNumber, IsObject } from 'class-validator';
+import {
+  IsString,
+  IsOptional,
+  IsUrl,
+  IsNumber,
+  IsObject,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class BrowserRequestDto {

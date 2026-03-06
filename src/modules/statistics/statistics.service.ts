@@ -68,7 +68,8 @@ export class StatisticsService {
       domains: domains.map((d) => ({
         domain: d.domain,
         count: parseInt(d.count),
-        percentage: total > 0 ? ((parseInt(d.count) / total) * 100).toFixed(2) : '0',
+        percentage:
+          total > 0 ? ((parseInt(d.count) / total) * 100).toFixed(2) : '0',
       })),
     };
   }
