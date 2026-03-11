@@ -4,6 +4,9 @@ import { Repository } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
 import { Webpage } from '../webpage/entities/webpage.entity';
 import { WebsocketGateway } from '../websocket/websocket.gateway';
+import * as http from 'http';
+import * as https from 'https';
+import type { Response } from 'express';
 
 @Injectable()
 export class CallRecordService {
@@ -216,5 +219,67 @@ export class CallRecordService {
         this.lastUpdateTimes.set(key, latestRecord.createdAt);
       }
     }
+  }
+
+  /**
+   * 代理录音文件：从 PBX 系统流式转发录音到前端
+   */
+  proxyRecording(recordingUrl: string, res: Response): void {
+    const url = new URL(recordingUrl);
+    const isHttps = url.protocol === 'https:';
+    const client = isHttps ? https : http;
+
+    const options = {
+      hostname: url.hostname,
+      port: url.port || (isHttps ? 443 : 80),
+      path: url.pathname + url.search,
+      method: 'GET',
+      timeout: 60000,
+    };
+
+    const req = client.request(options, (upstream) => {
+      if (upstream.statusCode && upstream.statusCode >= 400) {
+        res.status(upstream.statusCode).json({
+          success: false,
+          message: `录音文件请求失败，上游返回 ${upstream.statusCode}`,
+        });
+        return;
+      }
+
+      // 透传上游响应头
+      if (upstream.headers['content-type']) {
+        res.setHeader('Content-Type', upstream.headers['content-type']);
+      }
+      if (upstream.headers['content-length']) {
+        res.setHeader('Content-Length', upstream.headers['content-length']);
+      }
+      if (upstream.headers['content-disposition']) {
+        res.setHeader('Content-Disposition', upstream.headers['content-disposition']);
+      }
+
+      // 流式转发
+      upstream.pipe(res);
+    });
+
+    req.on('error', (error) => {
+      if (!res.headersSent) {
+        res.status(502).json({
+          success: false,
+          message: `录音文件请求失败: ${error.message}`,
+        });
+      }
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      if (!res.headersSent) {
+        res.status(504).json({
+          success: false,
+          message: '录音文件请求超时',
+        });
+      }
+    });
+
+    req.end();
   }
 }

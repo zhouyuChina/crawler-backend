@@ -20,7 +20,8 @@
       "Bash(docker ps:*)",
       "Bash(PGPASSWORD=\"ServBay.dev\" psql:*)",
       "Bash(PGPASSWORD='ServBay.dev' psql:*)",
-      "Bash(git push)"
+      "Bash(git push)",
+      "Bash(npx tsc --noEmit)"
     ]
   }
 }
