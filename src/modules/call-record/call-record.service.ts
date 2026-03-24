@@ -21,8 +21,14 @@ export class CallRecordService {
   // 通话类型（需要判断结束状态的）
   private readonly CALL_TYPES = ['get_curcall_in', 'get_curcall_out'];
 
-  // 记录最后更新时间
-  private lastUpdateTimes = new Map<string, Date>();
+  // 只跟踪仍在进行中的通话，避免空闲时仍然持续扫库
+  private activeCalls = new Map<
+    string,
+    {
+      webpageId: string;
+      lastUpdate: Date;
+    }
+  >();
 
   // 记录每种类型的最新内容（用于去重）
   private lastRecordContents = new Map<string, string>();
@@ -146,8 +152,14 @@ export class CallRecordService {
    * 记录通话更新时间
    */
   recordCallUpdate(recordType: string, webpageId: string) {
-    const key = `${recordType}:${webpageId}`;
-    this.lastUpdateTimes.set(key, new Date());
+    if (!this.CALL_TYPES.includes(recordType)) {
+      return;
+    }
+
+    this.activeCalls.set(recordType, {
+      webpageId,
+      lastUpdate: new Date(),
+    });
   }
 
   /**
@@ -185,38 +197,26 @@ export class CallRecordService {
    */
   @Cron('*/1 * * * * *') // 每秒执行
   async checkCallStatus() {
+    if (this.activeCalls.size === 0) {
+      return;
+    }
+
     const threeSecondsAgo = new Date(Date.now() - 3000);
 
-    // 检查每个通话类型的最新记录
-    for (const callType of this.CALL_TYPES) {
-      const latestRecord = await this.findLatestByType(callType);
-
-      if (!latestRecord) {
-        continue;
-      }
-
-      const key = `${callType}:${latestRecord.id}`;
-      const lastUpdate = this.lastUpdateTimes.get(key);
-
-      // 如果有记录更新时间，且超过 3 秒没更新
-      if (lastUpdate && lastUpdate < threeSecondsAgo) {
-        console.log(`📞 通话已结束: ${callType} (${latestRecord.id})`);
+    for (const [callType, activeCall] of this.activeCalls.entries()) {
+      if (activeCall.lastUpdate < threeSecondsAgo) {
+        console.log(`📞 通话已结束: ${callType} (${activeCall.webpageId})`);
 
         // 推送通话结束事件
         this.websocketGateway.broadcastCallStatusChanged({
-          id: latestRecord.id,
+          id: activeCall.webpageId,
           recordType: callType,
           status: 'ended',
           parsedData: null,
           timestamp: new Date().toISOString(),
         });
 
-        // 清理记录
-        this.lastUpdateTimes.delete(key);
-      }
-      // 如果记录是最近创建的（3秒内），但没有更新记录，标记为活跃
-      else if (!lastUpdate && latestRecord.createdAt > threeSecondsAgo) {
-        this.lastUpdateTimes.set(key, latestRecord.createdAt);
+        this.activeCalls.delete(callType);
       }
     }
   }
