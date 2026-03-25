@@ -42,3 +42,7 @@ lerna-debug.log*
 
 # Uploads
 /uploads
+
+# Release artifacts
+/.release
+/release.zip

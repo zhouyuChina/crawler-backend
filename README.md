@@ -399,6 +399,45 @@ NODE_ENV=production DB_SYNCHRONIZE=true npm run start:prod
 
 同样地，首次启动成功后请把 `DB_SYNCHRONIZE` 改为 `false`。
 
+### 手动上传用的 release.zip
+
+如果你是手动上传代码到服务器，推荐先在本地生成发布包:
+
+```bash
+npm run release
+```
+
+这个命令会先执行构建，再在仓库根目录生成 `release.zip`。压缩包默认包含:
+
+- `dist/`
+- `public/`
+- `package.json`
+- `package-lock.json`
+- `.env.production.example`
+
+默认**不包含**:
+
+- `node_modules/`
+- `.env.production`
+- `uploads/`
+
+如果你确实需要把现有上传文件一起带上，可以执行:
+
+```bash
+INCLUDE_UPLOADS=true npm run release
+```
+
+服务器上的最小操作步骤:
+
+```bash
+unzip release.zip -d crm-backend
+cd crm-backend
+cp .env.production.example .env.production
+# 修改 .env.production
+npm ci --omit=dev
+NODE_ENV=production DB_SYNCHRONIZE=true npm run start:prod
+```
+
 ### 生产环境建议
 
 1. 不要把真实的 `.env.production` 提交到 Git。
