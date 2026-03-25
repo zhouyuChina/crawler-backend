@@ -15,10 +15,15 @@ import { MonitorModule } from './modules/monitor/monitor.module';
 import { CallRecordModule } from './modules/call-record/call-record.module';
 import { LoggerMiddleware } from './common/middleware/logger.middleware';
 
+const envFilePath = process.env.NODE_ENV
+  ? [`.env.${process.env.NODE_ENV}`, '.env']
+  : ['.env'];
+
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+      envFilePath,
       load: [configuration],
     }),
     ScheduleModule.forRoot(), // 启用定时任务

@@ -315,7 +315,7 @@ npm run lint
 
 ## 注意事项
 
-1. **数据库自动同步**: 开发环境下，TypeORM 会自动同步数据库结构（`synchronize: true`）。生产环境请使用数据库迁移。
+1. **数据库建表**: 当前仓库没有完整的 TypeORM 迁移链路。首次生产部署请使用 `DB_SYNCHRONIZE=true` 自动建表，确认表结构创建完成后再改回 `false`。
 
 2. **文件存储**: 当前使用本地存储，生产环境建议使用云存储服务（S3、OSS 等）。
 
@@ -325,90 +325,85 @@ npm run lint
 
 ## 生产环境部署
 
-### 环境变量配置
+### 推荐方式: Docker Compose 一键部署
 
-生产环境**不是**简单修改 `.env` 就可以，需要注意以下几点：
+仓库已经内置以下文件:
 
-#### ⚠️ 必须修改的配置
+- `Dockerfile`
+- `docker-compose.yml`
+- `quick-deploy.sh`
+- `.env.production.example`
 
-1. **NODE_ENV** - 必须设置为 `production`
-   ```env
-   NODE_ENV=production
-   ```
-   这会关闭数据库自动同步（synchronize: false），避免误操作删除数据！
+首次部署只需要:
 
-2. **数据库配置** - 使用生产环境的数据库凭据
-   ```env
-   DB_HOST=your-production-db-host
-   DB_USERNAME=your-db-username
-   DB_PASSWORD=your-strong-password
-   ```
-
-3. **CORS 配置** - 指定前端域名，禁止使用 `*`
-   ```env
-   CORS_ORIGIN=https://your-frontend-domain.com
-   ```
-
-#### 📋 生产环境检查清单
-
-- [ ] 设置 `NODE_ENV=production`
-- [ ] 配置强密码的数据库凭据
-- [ ] 限制 CORS 为特定域名
-- [ ] 关闭数据库日志（`logging: false`）
-- [ ] 使用数据库迁移而非自动同步
-- [ ] 配置反向代理（Nginx）
-- [ ] 启用 HTTPS
-- [ ] 配置进程管理器（PM2）
-- [ ] 设置文件上传大小限制
-- [ ] 配置日志收集系统
-
-#### 🚀 推荐部署方式
-
-**方式 1: PM2 进程管理**
 ```bash
-# 安装 PM2
-npm install -g pm2
-
-# 启动应用
-pm2 start dist/main.js --name crm-backend
-
-# 设置开机自启
-pm2 startup
-pm2 save
-```
-
-**方式 2: Docker 部署**
-```dockerfile
-FROM node:18-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --only=production
-COPY dist ./dist
-EXPOSE 3000
-CMD ["node", "dist/main.js"]
-```
-
-**方式 3: 使用环境变量文件**
-```bash
-# 不要直接修改 .env 文件
-# 而是创建 .env.production 并使用它
 cp .env.production.example .env.production
-# 修改 .env.production
-nano .env.production
-
-# 启动时指定环境文件
-NODE_ENV=production node dist/main.js
+sh ./quick-deploy.sh
 ```
 
-#### 🔒 安全建议
+也可以直接执行:
 
-1. **永远不要**提交 `.env` 文件到 Git
-2. 使用环境变量或密钥管理服务（AWS Secrets Manager、HashiCorp Vault）
-3. 定期轮换数据库密码
-4. 启用 HTTPS（使用 Let's Encrypt）
-5. 配置防火墙规则
-6. 限制文件上传大小和类型
-7. 添加速率限制（使用 `@nestjs/throttler`）
+```bash
+npm run deploy:quick
+```
+
+部署完成后检查:
+
+- API: `http://localhost:3000/api`
+- 健康检查: `http://localhost:3000/api/health`
+- 监控页: `http://localhost:3000/api/monitor`
+
+### 首次部署后的一个必做动作
+
+`.env.production.example` 默认把 `DB_SYNCHRONIZE` 设为 `true`，目的是让当前项目在第一次启动时自动创建表结构。
+
+首次部署成功后，请把 `.env.production` 中的这项改为:
+
+```env
+DB_SYNCHRONIZE=false
+```
+
+然后重新执行一次:
+
+```bash
+sh ./quick-deploy.sh
+```
+
+### 常用部署命令
+
+```bash
+# 查看容器状态
+docker compose --env-file .env.production ps
+
+# 查看后端日志
+docker compose --env-file .env.production logs -f app
+
+# 重新构建并部署
+docker compose --env-file .env.production up -d --build
+
+# 停止服务
+docker compose --env-file .env.production down
+```
+
+### 不使用 Docker 的最小部署方式
+
+如果你当前机器已经安装了 Node.js 和 PostgreSQL，也可以先用下面这组命令快速跑起来:
+
+```bash
+cp .env.production.example .env.production
+# 把 DB_HOST 改成真实数据库地址，例如 localhost
+npm install
+npm run build
+NODE_ENV=production DB_SYNCHRONIZE=true npm run start:prod
+```
+
+同样地，首次启动成功后请把 `DB_SYNCHRONIZE` 改为 `false`。
+
+### 生产环境建议
+
+1. 不要把真实的 `.env.production` 提交到 Git。
+2. 对外公开前请修改 `DB_PASSWORD` 和 `CORS_ORIGIN`。
+3. 如果要挂公网域名，建议在前面加 Nginx 或其他反向代理，并开启 HTTPS。
 
 ## 日志记录
 

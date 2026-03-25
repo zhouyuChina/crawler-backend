@@ -1,3 +1,11 @@
+const parseBoolean = (value: string | undefined, fallback: boolean) => {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  return value === 'true';
+};
+
 export default () => ({
   port: parseInt(process.env.PORT || '3000', 10),
   database: {
@@ -8,8 +16,11 @@ export default () => ({
     password: process.env.DB_PASSWORD || 'postgres',
     database: process.env.DB_DATABASE || 'crm_db',
     entities: [__dirname + '/../**/*.entity{.ts,.js}'],
-    synchronize: process.env.NODE_ENV !== 'production',
-    logging: process.env.DB_LOGGING === 'true',
+    synchronize: parseBoolean(
+      process.env.DB_SYNCHRONIZE,
+      process.env.NODE_ENV !== 'production',
+    ),
+    logging: parseBoolean(process.env.DB_LOGGING, false),
   },
   upload: {
     dest: process.env.UPLOAD_PATH || './uploads',
