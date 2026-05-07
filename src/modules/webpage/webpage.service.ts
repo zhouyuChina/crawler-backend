@@ -5,6 +5,23 @@ import { Webpage } from './entities/webpage.entity';
 import { CreateWebpageDto } from './dto/create-webpage.dto';
 import { QueryWebpageDto } from './dto/query-webpage.dto';
 
+/** PostgreSQL UTF-8 text / jsonb cannot contain U+0000 */
+function stripNullBytesDeep(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return value.replace(/\0/g, '');
+  if (value instanceof Date) return value;
+  if (Array.isArray(value)) return value.map(stripNullBytesDeep);
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(obj)) {
+      out[k] = stripNullBytesDeep(obj[k]);
+    }
+    return out;
+  }
+  return value;
+}
+
 @Injectable()
 export class WebpageService {
   constructor(
@@ -13,7 +30,10 @@ export class WebpageService {
   ) {}
 
   async create(createWebpageDto: CreateWebpageDto): Promise<Webpage> {
-    const webpage = this.webpageRepository.create(createWebpageDto);
+    const dto = stripNullBytesDeep(
+      createWebpageDto,
+    ) as CreateWebpageDto;
+    const webpage = this.webpageRepository.create(dto);
     return await this.webpageRepository.save(webpage);
   }
 
