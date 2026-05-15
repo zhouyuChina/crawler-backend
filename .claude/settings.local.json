@@ -21,7 +21,9 @@
       "Bash(PGPASSWORD=\"ServBay.dev\" psql:*)",
       "Bash(PGPASSWORD='ServBay.dev' psql:*)",
       "Bash(git push)",
-      "Bash(npx tsc --noEmit)"
+      "Bash(npx tsc --noEmit)",
+      "Bash(timeout 120 npx jest --testPathPattern='voice-table' --no-coverage)",
+      "Bash(./node_modules/.bin/tsc --noEmit)"
     ]
   }
 }

@@ -362,6 +362,31 @@
         </div>
 
         <div class="panel">
+            <div class="panel-title">表格抓取实时面板 (cc_voiceivr / cc_voiceop)</div>
+            <div class="stats-grid" style="margin: 0 0 16px 0;">
+                <div class="stat-card">
+                    <div class="stat-label">已抓取行数 (本次会话)</div>
+                    <div class="stat-value success" id="vtRowsTotal">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">最新模块 / mid</div>
+                    <div class="stat-value" id="vtModuleMid" style="font-size:1.4em;">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">进度</div>
+                    <div class="stat-value" id="vtProgress" style="font-size:1.4em;">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">最新状态</div>
+                    <div class="stat-value" id="vtStatus" style="font-size:1.2em;">-</div>
+                </div>
+            </div>
+            <div class="request-list" id="vtList">
+                <div class="empty-state">等待表格抓取事件...</div>
+            </div>
+        </div>
+
+        <div class="panel">
             <div class="panel-title">最近请求 (最新100条)</div>
             <div class="request-list" id="requestList">
                 <div class="empty-state">
@@ -447,6 +472,72 @@
             socket.on('webpage:created', (data) => {
                 console.log('网页已创建:', data);
             });
+
+            // 表格分页抓取事件
+            socket.on('table-crawl:rows', (data) => {
+                console.log('table-crawl:rows', data);
+                vtState.rowsTotal += (data.rows?.length || 0);
+                vtState.module = data.module;
+                vtState.mid = data.mid;
+                pushVtEvent({
+                    kind: 'rows',
+                    text: `${data.module} mid=${data.mid} page=${data.page} +${data.rows?.length || 0} 行`,
+                    timestamp: data.timestamp,
+                });
+                renderVt();
+            });
+            socket.on('table-crawl:progress', (data) => {
+                console.log('table-crawl:progress', data);
+                vtState.module = data.module;
+                vtState.mid = data.mid;
+                vtState.page = data.page;
+                vtState.pagesToFetch = data.pagesToFetch;
+                vtState.status = data.status;
+                if (data.status === 'failed' && data.error) {
+                    pushVtEvent({
+                        kind: 'progress',
+                        text: `❌ ${data.module} mid=${data.mid} page=${data.page}/${data.pagesToFetch} ${data.error}`,
+                        timestamp: new Date().toISOString(),
+                    });
+                }
+                renderVt();
+            });
+            socket.on('table-crawl:summary', (data) => {
+                console.log('table-crawl:summary', data);
+                pushVtEvent({
+                    kind: 'summary',
+                    text: `📊 ${data.module} mid=${data.mid} 完成 (${data.pagesToFetch}/${data.totalPages} 页) summary=${JSON.stringify(data.summary)}`,
+                    timestamp: data.capturedAt,
+                });
+                renderVt();
+            });
+        }
+
+        // ============= 表格抓取面板 =============
+        const vtState = { rowsTotal: 0, module: '-', mid: '-', page: 0, pagesToFetch: 0, status: '-' };
+        const vtEvents = [];
+        const VT_MAX = 50;
+        function pushVtEvent(e) {
+            vtEvents.unshift(e);
+            if (vtEvents.length > VT_MAX) vtEvents.pop();
+        }
+        function renderVt() {
+            document.getElementById('vtRowsTotal').textContent = vtState.rowsTotal;
+            document.getElementById('vtModuleMid').textContent = `${vtState.module} / ${vtState.mid}`;
+            document.getElementById('vtProgress').textContent = vtState.pagesToFetch
+                ? `${vtState.page}/${vtState.pagesToFetch}`
+                : '-';
+            document.getElementById('vtStatus').textContent = vtState.status;
+            const list = document.getElementById('vtList');
+            if (vtEvents.length === 0) {
+                list.innerHTML = '<div class="empty-state">等待表格抓取事件...</div>';
+                return;
+            }
+            list.innerHTML = vtEvents.map(e => `
+                <div class="request-item">
+                    <div class="request-url">${escapeHtml(e.text)}</div>
+                    <div class="request-time">${new Date(e.timestamp).toLocaleString('zh-CN')}</div>
+                </div>`).join('');
         }
 
         function updateConnectionStatus(connected) {

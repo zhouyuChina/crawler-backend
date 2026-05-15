@@ -142,4 +142,48 @@ export class WebsocketGateway
     this.server.emit('call-status:changed', data);
     this.logger.log(`广播通话状态变更: ${data.recordType} → ${data.status}`);
   }
+
+  // 广播表格抓取每页新增的行
+  broadcastVoiceTableRows(data: {
+    module: string;
+    mid: number;
+    page: number;
+    rows: any[];
+    taskId: string;
+    timestamp: string;
+  }) {
+    this.server.emit('table-crawl:rows', data);
+    this.logger.log(
+      `广播表格新增行: ${data.module} mid=${data.mid} page=${data.page} +${data.rows.length}`,
+    );
+  }
+
+  // 广播表格抓取汇总
+  broadcastVoiceTableSummary(data: {
+    module: string;
+    mid: number;
+    summary: any;
+    totalPages: number;
+    pagesToFetch: number;
+    capturedAt: string;
+    taskId: string;
+  }) {
+    this.server.emit('table-crawl:summary', data);
+    this.logger.log(
+      `广播表格汇总: ${data.module} mid=${data.mid} pages=${data.pagesToFetch}/${data.totalPages}`,
+    );
+  }
+
+  // 广播表格抓取进度
+  broadcastVoiceTableProgress(data: {
+    module: string;
+    mid: number;
+    taskId: string;
+    page: number;
+    pagesToFetch: number;
+    status: 'running' | 'completed' | 'failed' | 'throttled';
+    error?: string;
+  }) {
+    this.server.emit('table-crawl:progress', data);
+  }
 }

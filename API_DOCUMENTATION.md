@@ -218,6 +218,48 @@ fetch('http://localhost:9000/api/plugin/requests', {
 
 ---
 
+### 4. 表格分页抓取（cc_voiceivr / cc_voiceop）
+
+**描述**: 接收插件转发的目标 URL 与 Cookie，由后端按 `pageID` 累加翻页抓取并入库。命中 `cc_voiceivr` 走 `voice_ivr` 策略，命中 `cc_voiceop` 走 `voice_op` 策略。
+
+**请求方式**: `POST /api/plugin/table-crawl`
+
+**Content-Type**: `application/json`
+
+**请求参数**:
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| url | string | ✅ | 命中规则的目标 URL |
+| headers | object \| array | ❌ | 浏览器原始请求头（含 Cookie），数组或对象均可 |
+
+**节流**: 同 `(module, mid)` 在 5 分钟内只接受一次成功调用，命中节流时返回 `{ success:false, throttled:true, retryAfterMs }`。
+
+**增量策略**: 首次抓取全量；再次触发时只抓 `(newTotalPages - lastTotalPages + 1)` 页，靠 `(mid, recordId/recordKey)` 唯一约束自动去重。若新总页数小于历史值则视为列表收缩，按全量再来一次。
+
+**成功响应**:
+```json
+{
+  "success": true,
+  "module": "voice_ivr",
+  "mid": 24,
+  "taskId": "uuid",
+  "totalPages": 7730,
+  "pagesToFetch": 11
+}
+```
+
+**WebSocket 事件**(命名空间 `/ws`):
+- `table-crawl:rows` `{ module, mid, page, rows[], taskId, timestamp }`
+- `table-crawl:summary` `{ module, mid, summary, totalPages, pagesToFetch, capturedAt, taskId }`
+- `table-crawl:progress` `{ module, mid, taskId, page, pagesToFetch, status }`
+
+**入库表**:
+- `voice_ivr_records` / `voice_ivr_summaries`
+- `voice_op_records` / `voice_op_summaries`
+
+---
+
 ## 网页数据接口
 
 ### 1. 获取网页列表

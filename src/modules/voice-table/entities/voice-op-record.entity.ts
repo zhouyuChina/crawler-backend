@@ -1,0 +1,61 @@
+import {
+  Entity,
+  PrimaryColumn,
+  Column,
+  CreateDateColumn,
+  Index,
+  Unique,
+  BeforeInsert,
+} from 'typeorm';
+import { v4 as uuidv4 } from 'uuid';
+
+@Entity('voice_op_records')
+@Unique('uq_voice_op_record', ['mid', 'recordKey'])
+@Index('idx_voice_op_record_mid_created', ['mid', 'createdAt'])
+export class VoiceOpRecord {
+  @PrimaryColumn('uuid')
+  id: string;
+
+  @BeforeInsert()
+  generateId() {
+    if (!this.id) {
+      this.id = uuidv4();
+    }
+  }
+
+  @Column({ type: 'integer' })
+  mid: number;
+
+  @Column({ type: 'varchar', length: 64 })
+  recordKey: string;
+
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  task: string | null;
+
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  src: string | null;
+
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  dst: string | null;
+
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  agent: string | null;
+
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  reason: string | null;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  duration: string | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  callDate: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  endDate: Date | null;
+
+  @Column({ type: 'text', nullable: true })
+  sourceUrl: string | null;
+
+  @CreateDateColumn()
+  createdAt: Date;
+}

@@ -1,0 +1,64 @@
+<html>
+    <head>
+        <title></title>
+            <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+      </head>
+    <body>
+        <form name="form4" method="GET" action="down-excel.php">
+            <h1><span>語音記錄</span></h1>
+        </form>
+        <div align="center">
+            <div class="filter-div" id="filterDiv">
+                <table>
+                    <tr>
+                        <td align="left">語音紀錄分析：77300</td>
+                        <td align="left"><font color='red'>接通失敗： 0</font>&nbsp;&nbsp;<font color='blue'>被叫忙線： 0 </font>&nbsp;&nbsp;<font color='brown'>無人接聽： 46788</font>&nbsp;&nbsp;<font color='green'>語音通話： 30512 </font></td>
+                    </tr>
+                </table>
+            </div>
+            <div class="list-div" id="listDiv">
+                <table cellpadding="3" cellspacing="1">
+                    <form action="delete.php?action=batch"  method="POST" name="listForm" id="listForm">
+                        <tr>
+                            <th><input onclick='selectAll(this, "checkboxes")' type="checkbox" /></th>
+                            <th nowrap align="center"><a href="javascript:sort('src'); ">主叫</a></th>
+                            <th nowrap align="center"><a href="javascript:sort('dst'); ">被叫</a></th>
+                            <th nowrap align="center"><a href="javascript:sort('disposition'); ">狀態</a></th>
+                            <th nowrap align="center"><a href="javascript:sort('reason'); ">終止原因</a></th>
+                            <th nowrap align="center">任務</th>
+                            <th nowrap align="center"><a href="javascript:sort('calldate'); ">呼叫時間</a></th>
+                            <th>操作</th>
+                        </tr>
+<tr>
+    <td class="first-cell">
+    <input type='checkbox' name='checkboxes[]' value='96029' />&nbsp1    </td>
+    <td>186000</td>
+    <td>0433274378</td>
+    <td align="center">通話狀態<td align='center'><font color='green'>語音通話</font></td></td>
+    <td align="center"></td>
+    <td align="center">2026-05-14 14:04:43</td>
+<td align="center"><a href="javascript:delete_voicecallee('96029')">刪除</a></td>
+</tr>
+<tr>
+    <td class="first-cell">
+    <input type='checkbox' name='checkboxes[]' value='96027' />&nbsp3    </td>
+    <td>186000</td>
+    <td>0433274330</td>
+    <td align="center">振鈴狀態<td align='center'><font color='brown'>無人接聽</font></td></td>
+    <td align="center"></td>
+    <td align="center">2026-05-14 14:04:56</td>
+<td align="center"><a href="javascript:delete_voicecallee('96027')">刪除</a></td>
+</tr>
+                </table>
+                <table cellpadding="3" cellspacing="1">
+                    <tr>
+                        <th align="left" width="150">↑<a href="###" onClick="bdelete_voicecallee();">刪除</a>&nbsp;</th>
+                        <th>共有7730頁77300筆</th>
+                        <th width="150">&nbsp;</th>
+                    </tr>
+                </table>
+            </form>
+        </div>
+    </div>
+</body>
+</html>

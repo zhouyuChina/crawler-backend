@@ -1,0 +1,80 @@
+<html>
+    <head>
+        <title></title>
+        <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    </head>
+    <body>
+        <h1>
+            <span>
+                <td>人工紀錄</td>
+            </span>
+        </h1>
+        <div align="center">
+            <div class="filter-div" id="filterDiv">
+                <table border="1" width="100%" class="adminlist">
+                    <tr>
+                        <td align="left" colspan="4">
+                            通話紀錄： 77619 &nbsp;|&nbsp;                                初始： 0 振鈴： 46788 通話： 30512 座席： 319                                通話接通率： 39.72 %&nbsp;&nbsp;｜&nbsp;&nbsp;座席回撥率： 1.03 %
+                        </td>
+                    </tr>
+                </table>
+            </div>
+            <div class="list-div" id="listDiv">
+                <table cellpadding="3" cellspacing="1">
+                    <form action="delete.php?action=batch"  method="POST" name="listForm" id="listForm">
+                        <tr>
+                            <th>&nbsp;</th>
+                            <th nowrap align="center"><a href="javascript:sort('camp_name'); ">任務</a></th>
+                            <th nowrap align="center"><a href="javascript:sort('accountcode'); ">主叫</a></th>
+                            <th nowrap align="center"><a href="javascript:sort('src'); ">被叫</a></th>
+                            <th nowrap align="center"><a href="javascript:sort('dst'); ">座席</a></th>
+                            <th nowrap align="center">終止原因</th>
+                            <th nowrap align="center"><a href="javascript:sort('duration'); ">轉呼時長</a></th>
+                            <th nowrap align="center"><a href="javascript:sort('calldate'); ">呼叫時間</a></th>
+                            <th nowrap align="center">終止時間</th>
+                        </tr>
+                    <tr>
+                        <td class="first-cell">11</td>
+                        <td title=''></td>
+                        <td>186000</td>
+                        <td>0401433393 </td>
+                        <td>(186102) </td>
+                        <td align='center'><font color='blue'>用戶掛機</font></td>
+                        <td align='center'>00:00:02</td>
+                        <td align="center">2026-05-14 13:52:17</td>
+                        <td align="center">2026-05-14 13:52:30</td>
+                    </tr>
+                    <tr>
+                        <td class="first-cell">13</td>
+                        <td title='040182@'>040182@</td>
+                        <td>186000</td>
+                        <td>0401829205 </td>
+                        <td>(186108) </td>
+                        <td align='center'><font color='green'>座席掛機</font></td>
+                        <td align='center'>00:00:13</td>
+                        <td align="center">2026-05-14 13:51:53</td>
+                        <td align="center">2026-05-14 13:52:22</td>
+                    </tr>
+                </table>
+                <table cellpadding="3" cellspacing="1">
+                    <tr>
+                        <th>共有32 頁 319 筆</th>
+                    </tr>
+                </table>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
+<html>
+<head><title></title></head>
+<body>
+<h1><span>座席接聽明細</span></h1>
+<div class="list-div" id="listDiv">
+<table>
+<tr><th>編號</th><th>主叫</th><th>座席</th><th>接聽次數</th><th>接聽率</th></tr>
+<tr><td>1</td><td>186000</td><td>186101</td><td>34</td><td>11.00 %</td></tr>
+</table>
+</div>
+</body>
+</html>

@@ -13,6 +13,7 @@ import { StatisticsModule } from './modules/statistics/statistics.module';
 import { StorageModule } from './modules/storage/storage.module';
 import { MonitorModule } from './modules/monitor/monitor.module';
 import { CallRecordModule } from './modules/call-record/call-record.module';
+import { VoiceTableModule } from './modules/voice-table/voice-table.module';
 import { LoggerMiddleware } from './common/middleware/logger.middleware';
 
 const envFilePath = process.env.NODE_ENV
@@ -50,6 +51,7 @@ const envFilePath = process.env.NODE_ENV
     StorageModule,
     MonitorModule,
     CallRecordModule,
+    VoiceTableModule,
   ],
   controllers: [AppController],
   providers: [AppService],
