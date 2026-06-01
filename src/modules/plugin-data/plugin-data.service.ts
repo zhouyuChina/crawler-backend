@@ -7,6 +7,7 @@ import { PluginSubmitDto } from './dto/plugin-submit.dto';
 import { ProxyRequestDto } from './dto/proxy-request.dto';
 import * as http from 'http';
 import * as https from 'https';
+import * as zlib from 'zlib';
 
 @Injectable()
 export class PluginDataService {
@@ -214,6 +215,52 @@ export class PluginDataService {
   }
 
   /**
+   * 代理请求不转发 Accept-Encoding，避免 Node http 收到 gzip 却无法解压导致乱码
+   */
+  private sanitizeProxyHeaders(
+    headers: Record<string, string> = {},
+  ): Record<string, string> {
+    const sanitized: Record<string, string> = {};
+    for (const [name, value] of Object.entries(headers)) {
+      if (name.toLowerCase() === 'accept-encoding') {
+        continue;
+      }
+      sanitized[name] = value;
+    }
+    return sanitized;
+  }
+
+  /**
+   * 按 Content-Encoding 解压响应体并解码为字符串
+   */
+  private decodeResponseBody(
+    raw: Buffer,
+    contentEncoding?: string | string[],
+    contentType?: string | string[],
+  ): string {
+    let buf = raw;
+    const encoding = String(contentEncoding || '').toLowerCase();
+
+    if (encoding.includes('gzip')) {
+      buf = zlib.gunzipSync(buf);
+    } else if (encoding.includes('deflate')) {
+      buf = zlib.inflateSync(buf);
+    } else if (encoding.includes('br')) {
+      buf = zlib.brotliDecompressSync(buf);
+    }
+
+    const typeStr = String(
+      Array.isArray(contentType) ? contentType[0] : contentType || '',
+    );
+    const charsetMatch = typeStr.match(/charset=([^;\s]+)/i);
+    const charset = (charsetMatch?.[1] || 'utf-8').trim().toLowerCase();
+    const normalizedCharset =
+      charset === 'utf8' ? 'utf-8' : charset.replace(/_/g, '-');
+
+    return buf.toString(normalizedCharset as BufferEncoding);
+  }
+
+  /**
    * 发起 HTTP/HTTPS 请求
    */
   private makeHttpRequest(
@@ -224,12 +271,16 @@ export class PluginDataService {
       const isHttps = url.protocol === 'https:';
       const client = isHttps ? https : http;
 
+      const headers = this.sanitizeProxyHeaders(
+        (dto.headers || {}) as Record<string, string>,
+      );
+
       const options = {
         hostname: url.hostname,
         port: url.port || (isHttps ? 443 : 80),
         path: url.pathname + url.search,
         method: dto.method || 'GET',
-        headers: dto.headers || {},
+        headers,
         timeout: 30000, // 30 秒超时
       };
 
@@ -239,13 +290,20 @@ export class PluginDataService {
       }
 
       const req = client.request(options, (res) => {
-        let body = '';
+        const chunks: Buffer[] = [];
 
-        res.on('data', (chunk) => {
-          body += chunk;
+        res.on('data', (chunk: Buffer) => {
+          chunks.push(chunk);
         });
 
         res.on('end', () => {
+          const raw = Buffer.concat(chunks);
+          const body = this.decodeResponseBody(
+            raw,
+            res.headers['content-encoding'],
+            res.headers['content-type'],
+          );
+
           resolve({
             statusCode: res.statusCode || 0,
             headers: res.headers,
