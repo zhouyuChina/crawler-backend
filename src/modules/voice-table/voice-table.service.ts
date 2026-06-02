@@ -110,6 +110,9 @@ export class VoiceTableService {
 
     const firstParsed = strategy.parse(firstHtml);
     const newTotalPages = firstParsed.totalPages || 1;
+    this.logger.log(
+      `首页解析 ${key}: html=${firstHtml.length}b rows=${firstParsed.rows.length} totalPages=${newTotalPages}`,
+    );
 
     const lastTotalPages = await this.getLastTotalPages(strategy.module, mid);
     let pagesToFetch: number;
@@ -422,6 +425,12 @@ export class VoiceTableService {
     delete out['Host'];
     delete out['content-length'];
     delete out['Content-Length'];
+    // 不转发 Accept-Encoding，避免 gzip 响应被当作 utf-8 解析成乱码
+    for (const name of Object.keys(out)) {
+      if (name.toLowerCase() === 'accept-encoding') {
+        delete out[name];
+      }
+    }
     return out;
   }
 
