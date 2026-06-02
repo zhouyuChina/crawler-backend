@@ -20,7 +20,6 @@ import {
   ParsedRowVoiceOp,
   ParsedSummaryVoiceIvr,
   ParsedSummaryVoiceOp,
-  ParseResult,
   VoiceModule,
   VoiceTableStrategy,
 } from './strategies/strategy.types';
@@ -155,6 +154,17 @@ export class VoiceTableService {
     });
 
     const capturedAt = new Date();
+    await this.persistSummary(
+      strategy,
+      mid,
+      input.url,
+      firstParsed.summary,
+      firstParsed.summaryMatched,
+      newTotalPages,
+      pagesToFetch,
+      capturedAt,
+      taskId,
+    );
 
     // 第 2..N 页异步循环
     if (pagesToFetch > 1) {
@@ -167,28 +177,6 @@ export class VoiceTableService {
         taskId,
         key,
       })
-        .then((lastParsed) => {
-          // 优先用最后一页解析出的 summary（与 firstParsed 相同来源，但避免重复请求）
-          const summary =
-            this.isSummaryMatched(lastParsed)
-              ? lastParsed.summary
-              : firstParsed.summary;
-          const summaryMatched =
-            lastParsed.summaryMatched || firstParsed.summaryMatched;
-          const totalPages =
-            lastParsed.totalPages > 1 ? lastParsed.totalPages : newTotalPages;
-          return this.persistSummary(
-            strategy,
-            mid,
-            input.url,
-            summary,
-            summaryMatched,
-            totalPages,
-            pagesToFetch,
-            capturedAt,
-            taskId,
-          );
-        })
         .catch((err) => {
           this.logger.error(`后台抓取异常 ${key}: ${err.message}`);
         })
@@ -196,18 +184,6 @@ export class VoiceTableService {
           this.activeMap.delete(key);
         });
     } else {
-      // 单页:直接落 summary 并清锁（gzip 已修复，firstParsed.summary 即正确结果）
-      await this.persistSummary(
-        strategy,
-        mid,
-        input.url,
-        firstParsed.summary,
-        firstParsed.summaryMatched,
-        newTotalPages,
-        pagesToFetch,
-        capturedAt,
-        taskId,
-      );
       this.activeMap.delete(key);
     }
 
@@ -231,47 +207,25 @@ export class VoiceTableService {
     pagesToFetch: number;
     taskId: string;
     key: string;
-  }): Promise<ParseResult<any, any>> {
+  }): Promise<void> {
     const { strategy, mid, baseUrl, headers, pagesToFetch, taskId, key } = args;
-    let lastParsed: ParseResult<any, any> | null = null;
+    const failedPages: Array<{ page: number; error: string }> = [];
 
     for (let page = 2; page <= pagesToFetch; page++) {
       try {
-        const pageUrl = ensurePageIdParam(baseUrl, page);
-        const html = await this.fetchHtmlWithRetry(pageUrl, headers);
-        lastParsed = strategy.parse(html);
-        const inserted = await this.persistRows(
-          strategy.module,
+        await this.crawlPage({
+          strategy,
           mid,
           baseUrl,
-          lastParsed.rows,
-        );
-
-        if (inserted.length > 0) {
-          this.ws.broadcastVoiceTableRows({
-            module: strategy.module,
-            mid,
-            page,
-            rows: inserted,
-            taskId,
-            timestamp: new Date().toISOString(),
-          });
-        }
-
-        this.ws.broadcastVoiceTableProgress({
-          module: strategy.module,
-          mid,
-          taskId,
+          headers,
           page,
           pagesToFetch,
-          status: page === pagesToFetch ? 'completed' : 'running',
+          taskId,
         });
-
-        if (page < pagesToFetch) {
-          await sleep(PAGE_DELAY_MS);
-        }
       } catch (err: any) {
-        this.logger.error(`抓取 page=${page} 失败 ${key}: ${err.message}`);
+        const message = err.message || String(err);
+        failedPages.push({ page, error: message });
+        this.logger.warn(`抓取 page=${page} 失败, 稍后重试 ${key}: ${message}`);
         this.ws.broadcastVoiceTableProgress({
           module: strategy.module,
           mid,
@@ -279,14 +233,82 @@ export class VoiceTableService {
           page,
           pagesToFetch,
           status: 'failed',
-          error: err.message,
+          error: `${message}; queued for retry`,
         });
-        throw err;
+      }
+
+      if (page < pagesToFetch) {
+        await sleep(PAGE_DELAY_MS);
       }
     }
 
-    // 返回最后一页的解析结果供调用方提取 summary
-    return lastParsed!;
+    for (const failed of failedPages) {
+      try {
+        this.logger.log(`补抓 page=${failed.page} ${key}`);
+        await this.crawlPage({
+          strategy,
+          mid,
+          baseUrl,
+          headers,
+          page: failed.page,
+          pagesToFetch,
+          taskId,
+        });
+      } catch (err: any) {
+        const message = err.message || String(err);
+        this.logger.error(`补抓 page=${failed.page} 失败 ${key}: ${message}`);
+        this.ws.broadcastVoiceTableProgress({
+          module: strategy.module,
+          mid,
+          taskId,
+          page: failed.page,
+          pagesToFetch,
+          status: 'failed',
+          error: message,
+        });
+      }
+    }
+  }
+
+  private async crawlPage(args: {
+    strategy: VoiceTableStrategy;
+    mid: number;
+    baseUrl: string;
+    headers: Headers;
+    page: number;
+    pagesToFetch: number;
+    taskId: string;
+  }): Promise<void> {
+    const { strategy, mid, baseUrl, headers, page, pagesToFetch, taskId } = args;
+    const pageUrl = ensurePageIdParam(baseUrl, page);
+    const html = await this.fetchHtmlWithRetry(pageUrl, headers);
+    const parsed = strategy.parse(html);
+    const inserted = await this.persistRows(
+      strategy.module,
+      mid,
+      baseUrl,
+      parsed.rows,
+    );
+
+    if (inserted.length > 0) {
+      this.ws.broadcastVoiceTableRows({
+        module: strategy.module,
+        mid,
+        page,
+        rows: inserted,
+        taskId,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    this.ws.broadcastVoiceTableProgress({
+      module: strategy.module,
+      mid,
+      taskId,
+      page,
+      pagesToFetch,
+      status: page === pagesToFetch ? 'completed' : 'running',
+    });
   }
 
   private async getLastTotalPages(
@@ -302,10 +324,6 @@ export class VoiceTableService {
       .orderBy('s."capturedAt"', 'DESC')
       .getOne();
     return last ? last.totalPages : null;
-  }
-
-  private isSummaryMatched(result: ParseResult<any, any>): boolean {
-    return result.summaryMatched;
   }
 
   private async persistRows(
