@@ -20,6 +20,7 @@ import {
   ParsedRowVoiceOp,
   ParsedSummaryVoiceIvr,
   ParsedSummaryVoiceOp,
+  ParseResult,
   VoiceModule,
   VoiceTableStrategy,
 } from './strategies/strategy.types';
@@ -166,18 +167,28 @@ export class VoiceTableService {
         taskId,
         key,
       })
-        .then(() =>
-          this.persistSummary(
+        .then((lastParsed) => {
+          // 优先用最后一页解析出的 summary（与 firstParsed 相同来源，但避免重复请求）
+          const summary =
+            this.isSummaryMatched(lastParsed)
+              ? lastParsed.summary
+              : firstParsed.summary;
+          const summaryMatched =
+            lastParsed.summaryMatched || firstParsed.summaryMatched;
+          const totalPages =
+            lastParsed.totalPages > 1 ? lastParsed.totalPages : newTotalPages;
+          return this.persistSummary(
             strategy,
             mid,
             input.url,
-            firstParsed.summary,
-            newTotalPages,
+            summary,
+            summaryMatched,
+            totalPages,
             pagesToFetch,
             capturedAt,
             taskId,
-          ),
-        )
+          );
+        })
         .catch((err) => {
           this.logger.error(`后台抓取异常 ${key}: ${err.message}`);
         })
@@ -185,12 +196,13 @@ export class VoiceTableService {
           this.activeMap.delete(key);
         });
     } else {
-      // 单页:直接落 summary 并清锁
+      // 单页:直接落 summary 并清锁（gzip 已修复，firstParsed.summary 即正确结果）
       await this.persistSummary(
         strategy,
         mid,
         input.url,
         firstParsed.summary,
+        firstParsed.summaryMatched,
         newTotalPages,
         pagesToFetch,
         capturedAt,
@@ -219,19 +231,20 @@ export class VoiceTableService {
     pagesToFetch: number;
     taskId: string;
     key: string;
-  }): Promise<void> {
+  }): Promise<ParseResult<any, any>> {
     const { strategy, mid, baseUrl, headers, pagesToFetch, taskId, key } = args;
+    let lastParsed: ParseResult<any, any> | null = null;
 
     for (let page = 2; page <= pagesToFetch; page++) {
       try {
         const pageUrl = ensurePageIdParam(baseUrl, page);
         const html = await this.fetchHtmlWithRetry(pageUrl, headers);
-        const parsed = strategy.parse(html);
+        lastParsed = strategy.parse(html);
         const inserted = await this.persistRows(
           strategy.module,
           mid,
           baseUrl,
-          parsed.rows,
+          lastParsed.rows,
         );
 
         if (inserted.length > 0) {
@@ -271,24 +284,28 @@ export class VoiceTableService {
         throw err;
       }
     }
+
+    // 返回最后一页的解析结果供调用方提取 summary
+    return lastParsed!;
   }
 
   private async getLastTotalPages(
     module: VoiceModule,
     mid: number,
   ): Promise<number | null> {
-    if (module === 'voice_ivr') {
-      const last = await this.ivrSummaryRepo.findOne({
-        where: { mid },
-        order: { capturedAt: 'DESC' },
-      });
-      return last ? last.totalPages : null;
-    }
-    const last = await this.opSummaryRepo.findOne({
-      where: { mid },
-      order: { capturedAt: 'DESC' },
-    });
+    const repo =
+      module === 'voice_ivr' ? this.ivrSummaryRepo : this.opSummaryRepo;
+    const last = await repo
+      .createQueryBuilder('s')
+      .where('s.mid = :mid', { mid })
+      .andWhere('(s."totalRecords" > 0 OR s."totalPages" > 1)')
+      .orderBy('s."capturedAt"', 'DESC')
+      .getOne();
     return last ? last.totalPages : null;
+  }
+
+  private isSummaryMatched(result: ParseResult<any, any>): boolean {
+    return result.summaryMatched;
   }
 
   private async persistRows(
@@ -360,11 +377,19 @@ export class VoiceTableService {
     mid: number,
     sourceUrl: string,
     summary: ParsedSummaryVoiceIvr | ParsedSummaryVoiceOp,
+    summaryMatched: boolean,
     totalPages: number,
     pagesToFetch: number,
     capturedAt: Date,
     taskId: string,
   ): Promise<void> {
+    if (!summaryMatched) {
+      this.logger.warn(
+        `跳过无效 summary mid=${mid}: 未匹配到汇总区, 明细行可能已入库但汇总未写入`,
+      );
+      return;
+    }
+
     if (strategy.module === 'voice_ivr') {
       const s = summary as ParsedSummaryVoiceIvr;
       const e = new VoiceIvrSummary();
@@ -420,16 +445,10 @@ export class VoiceTableService {
     } else {
       Object.assign(out, headers);
     }
-    // 移除会与 node http 冲突的字段
-    delete out['host'];
-    delete out['Host'];
-    delete out['content-length'];
-    delete out['Content-Length'];
-    // 不转发 Accept-Encoding，避免 gzip 响应被当作 utf-8 解析成乱码
+    // 移除与 node http 冲突或会导致乱码的头
+    const BLOCKED = new Set(['host', 'content-length', 'accept-encoding']);
     for (const name of Object.keys(out)) {
-      if (name.toLowerCase() === 'accept-encoding') {
-        delete out[name];
-      }
+      if (BLOCKED.has(name.toLowerCase())) delete out[name];
     }
     return out;
   }

@@ -24,6 +24,7 @@ describe('voiceOpStrategy', () => {
   it('parses summary including rates', () => {
     const result = voiceOpStrategy.parse(html);
     expect(result.totalPages).toBe(32);
+    expect(result.summaryMatched).toBe(true);
     expect(result.summary).toEqual({
       totalRecords: 77619,
       initCount: 0,
@@ -33,6 +34,12 @@ describe('voiceOpStrategy', () => {
       connectRate: 39.72,
       callbackRate: 1.03,
     });
+  });
+
+  it('marks summary as unmatched when summary text is absent', () => {
+    const result = voiceOpStrategy.parse('<html><body>login</body></html>');
+    expect(result.summaryMatched).toBe(false);
+    expect(result.summary.totalRecords).toBe(0);
   });
 
   it('parses rows ignoring trailing 座席接聽明細 HTML', () => {

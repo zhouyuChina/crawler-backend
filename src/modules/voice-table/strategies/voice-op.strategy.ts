@@ -46,6 +46,10 @@ function extractOpSummary(html: string): ParsedSummaryVoiceOp {
   };
 }
 
+function hasOpSummary(html: string): boolean {
+  return SUMMARY_PATTERNS.totalRecords.test(html);
+}
+
 /** 截取第一个 </body> 之前的部分,丢掉拼接的"座席接聽明細" HTML */
 function truncateAtFirstBody(html: string): string {
   const idx = html.toLowerCase().indexOf('</body>');
@@ -120,6 +124,7 @@ export const voiceOpStrategy: VoiceTableStrategy<
     return {
       totalPages: extractTotalPages(truncated),
       summary: extractOpSummary(truncated),
+      summaryMatched: hasOpSummary(truncated),
       rows: extractOpRows(html),
     };
   },
@@ -133,5 +138,6 @@ export const __testables = {
   extractOpSummary,
   extractOpRows,
   buildOpRecordKey,
+  hasOpSummary,
   truncateAtFirstBody,
 };

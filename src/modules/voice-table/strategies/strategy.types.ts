@@ -44,6 +44,8 @@ export interface ParsedSummaryVoiceOp {
 export interface ParseResult<TRow, TSummary> {
   totalPages: number;
   summary: TSummary;
+  /** 是否在页面中匹配到了汇总区域，用于区分真实 0 数据和解析失败 */
+  summaryMatched: boolean;
   rows: TRow[];
 }
 

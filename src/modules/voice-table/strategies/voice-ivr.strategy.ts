@@ -34,6 +34,10 @@ function extractIvrSummary(html: string): ParsedSummaryVoiceIvr {
   };
 }
 
+function hasIvrSummary(html: string): boolean {
+  return SUMMARY_PATTERNS.totalRecords.test(html);
+}
+
 function extractIvrRows(html: string): ParsedRowVoiceIvr[] {
   const $ = cheerio.load(html);
   const rows: ParsedRowVoiceIvr[] = [];
@@ -81,6 +85,7 @@ export const voiceIvrStrategy: VoiceTableStrategy<
     return {
       totalPages: extractTotalPages(html),
       summary: extractIvrSummary(html),
+      summaryMatched: hasIvrSummary(html),
       rows: extractIvrRows(html),
     };
   },
@@ -91,4 +96,4 @@ export const voiceIvrStrategy: VoiceTableStrategy<
 };
 
 // 仅供测试导出
-export const __testables = { extractIvrSummary, extractIvrRows };
+export const __testables = { extractIvrSummary, extractIvrRows, hasIvrSummary };

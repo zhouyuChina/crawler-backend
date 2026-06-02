@@ -24,6 +24,7 @@ describe('voiceIvrStrategy', () => {
   it('parses summary, totalPages and rows', () => {
     const result = voiceIvrStrategy.parse(html);
     expect(result.totalPages).toBe(7730);
+    expect(result.summaryMatched).toBe(true);
     expect(result.summary).toEqual({
       totalRecords: 77300,
       connectFail: 0,
@@ -45,6 +46,12 @@ describe('voiceIvrStrategy', () => {
       statusType: '振鈴狀態',
       result: '無人接聽',
     });
+  });
+
+  it('marks summary as unmatched when summary text is absent', () => {
+    const result = voiceIvrStrategy.parse('<html><body>login</body></html>');
+    expect(result.summaryMatched).toBe(false);
+    expect(result.summary.totalRecords).toBe(0);
   });
 
   it('builds page url by replacing pageID', () => {
