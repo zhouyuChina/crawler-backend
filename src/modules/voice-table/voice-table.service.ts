@@ -28,6 +28,7 @@ const THROTTLE_MS = 5 * 60 * 1000;
 const PAGE_DELAY_MS = 200;
 const MAX_RETRIES = 2;
 const REQUEST_TIMEOUT_MS = 30000;
+const MIN_DETAIL_PAGES_PER_RUN = 10;
 
 type Headers = Record<string, string>;
 
@@ -88,10 +89,6 @@ export class VoiceTableService {
       return { success: false, throttled: true, retryAfterMs };
     }
 
-    if (this.activeMap.get(key)) {
-      return { success: false, busy: true, message: '该 mid 抓取任务正在进行' };
-    }
-
     const headers = this.normalizeHeaders(input.headers);
     const taskId = uuidv4();
 
@@ -119,13 +116,16 @@ export class VoiceTableService {
     if (lastTotalPages == null || newTotalPages < lastTotalPages) {
       pagesToFetch = newTotalPages;
     } else {
-      pagesToFetch = Math.max(1, newTotalPages - lastTotalPages + 1);
+      pagesToFetch = Math.max(
+        MIN_DETAIL_PAGES_PER_RUN,
+        newTotalPages - lastTotalPages + 1,
+      );
     }
     pagesToFetch = Math.min(pagesToFetch, newTotalPages);
+    const detailBusy = this.activeMap.get(key) === true;
 
-    // 落锁 + 节流
+    // 记录本次成功触发时间；明细后台锁在 summary 写入后再判断
     this.throttleMap.set(key, now);
-    this.activeMap.set(key, true);
 
     // 写入第一页行 + WS 推送
     const insertedFirst = await this.persistRows(
@@ -150,7 +150,7 @@ export class VoiceTableService {
       taskId,
       page: 1,
       pagesToFetch,
-      status: pagesToFetch === 1 ? 'completed' : 'running',
+      status: detailBusy || pagesToFetch === 1 ? 'completed' : 'running',
     });
 
     const capturedAt = new Date();
@@ -166,8 +166,23 @@ export class VoiceTableService {
       taskId,
     );
 
+    if (detailBusy) {
+      this.logger.log(`明细任务运行中, 仅刷新 summary ${key}`);
+      return {
+        success: true,
+        module: strategy.module,
+        mid,
+        taskId,
+        totalPages: newTotalPages,
+        pagesToFetch,
+        busy: true,
+        message: 'summary 已刷新，明细后台任务仍在运行',
+      };
+    }
+
     // 第 2..N 页异步循环
     if (pagesToFetch > 1) {
+      this.activeMap.set(key, true);
       void this.runRemainingPages({
         strategy,
         mid,
@@ -183,8 +198,6 @@ export class VoiceTableService {
         .finally(() => {
           this.activeMap.delete(key);
         });
-    } else {
-      this.activeMap.delete(key);
     }
 
     return {
