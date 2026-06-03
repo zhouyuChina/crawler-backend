@@ -82,13 +82,6 @@ export class VoiceTableService {
     const key = `${strategy.module}:${mid}`;
     const now = Date.now();
 
-    const lastStart = this.throttleMap.get(key) ?? 0;
-    if (now - lastStart < THROTTLE_MS) {
-      const retryAfterMs = THROTTLE_MS - (now - lastStart);
-      this.logger.log(`节流命中 ${key}, 剩余 ${Math.ceil(retryAfterMs / 1000)}s`);
-      return { success: false, throttled: true, retryAfterMs };
-    }
-
     const headers = this.normalizeHeaders(input.headers);
     const taskId = uuidv4();
 
@@ -123,9 +116,12 @@ export class VoiceTableService {
     }
     pagesToFetch = Math.min(pagesToFetch, newTotalPages);
     const detailBusy = this.activeMap.get(key) === true;
-
-    // 记录本次成功触发时间；明细后台锁在 summary 写入后再判断
-    this.throttleMap.set(key, now);
+    const lastDetailStart = this.throttleMap.get(key) ?? 0;
+    const detailRetryAfterMs = Math.max(
+      0,
+      THROTTLE_MS - (now - lastDetailStart),
+    );
+    const detailThrottled = detailRetryAfterMs > 0;
 
     // 写入第一页行 + WS 推送
     const insertedFirst = await this.persistRows(
@@ -150,7 +146,10 @@ export class VoiceTableService {
       taskId,
       page: 1,
       pagesToFetch,
-      status: detailBusy || pagesToFetch === 1 ? 'completed' : 'running',
+      status:
+        detailBusy || detailThrottled || pagesToFetch === 1
+          ? 'completed'
+          : 'running',
     });
 
     const capturedAt = new Date();
@@ -180,8 +179,27 @@ export class VoiceTableService {
       };
     }
 
+    if (detailThrottled) {
+      this.logger.log(
+        `明细节流命中 ${key}, 仅刷新 summary, 剩余 ${Math.ceil(
+          detailRetryAfterMs / 1000,
+        )}s`,
+      );
+      return {
+        success: true,
+        module: strategy.module,
+        mid,
+        taskId,
+        totalPages: newTotalPages,
+        pagesToFetch,
+        retryAfterMs: detailRetryAfterMs,
+        message: 'summary 已刷新，明细后台任务受节流未启动',
+      };
+    }
+
     // 第 2..N 页异步循环
     if (pagesToFetch > 1) {
+      this.throttleMap.set(key, now);
       this.activeMap.set(key, true);
       void this.runRemainingPages({
         strategy,
