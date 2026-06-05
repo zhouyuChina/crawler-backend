@@ -6,6 +6,18 @@ const parseBoolean = (value: string | undefined, fallback: boolean) => {
   return value === 'true';
 };
 
+const parseChatIds = (...values: Array<string | undefined>): string[] => {
+  const ids = new Set<string>();
+  for (const value of values) {
+    if (!value?.trim()) continue;
+    for (const part of value.split(',')) {
+      const id = part.trim();
+      if (id) ids.add(id);
+    }
+  }
+  return [...ids];
+};
+
 export default () => ({
   port: parseInt(process.env.PORT || '3000', 10),
   database: {
@@ -37,6 +49,9 @@ export default () => ({
   },
   telegram: {
     botToken: process.env.TELEGRAM_BOT_TOKEN || '',
-    chatId: process.env.TELEGRAM_CHAT_ID || '',
+    chatIds: parseChatIds(
+      process.env.TELEGRAM_CHAT_IDS,
+      process.env.TELEGRAM_CHAT_ID,
+    ),
   },
 });

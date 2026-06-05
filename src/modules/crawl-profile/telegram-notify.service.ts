@@ -11,16 +11,6 @@ export class TelegramNotifyService {
 
   /** 检测到需人工验证时发送 Telegram 通知 */
   async notifyHumanCheckRequired(profile: CrawlProfile): Promise<void> {
-    const botToken = this.configService.get<string>('telegram.botToken');
-    const chatId = this.configService.get<string>('telegram.chatId');
-
-    if (!botToken || !chatId) {
-      this.logger.debug(
-        'Telegram 未配置（TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID），跳过通知',
-      );
-      return;
-    }
-
     const crmUrl = this.normalizeCrmUrl(profile.baseUrl);
     const text = [
       '⚠️ <b>CRM 需要人工验证</b>',
@@ -32,26 +22,11 @@ export class TelegramNotifyService {
       '请打开 CRM 完成登录/验证，并保持浏览器插件开启。',
     ].join('\n');
 
-    try {
-      await this.sendMessage(botToken, chatId, text);
-      this.logger.log(`已发送人工验证通知 → ${profile.name} (${crmUrl})`);
-    } catch (err: any) {
-      this.logger.error(`Telegram 通知失败: ${err.message}`);
-    }
+    await this.broadcast(text, `人工验证通知 → ${profile.name} (${crmUrl})`);
   }
 
   /** 人工验证已处理、认证恢复时发送 Telegram 通知 */
   async notifyHumanCheckResolved(profile: CrawlProfile): Promise<void> {
-    const botToken = this.configService.get<string>('telegram.botToken');
-    const chatId = this.configService.get<string>('telegram.chatId');
-
-    if (!botToken || !chatId) {
-      this.logger.debug(
-        'Telegram 未配置（TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID），跳过通知',
-      );
-      return;
-    }
-
     const crmUrl = this.normalizeCrmUrl(profile.baseUrl);
     const text = [
       '✅ <b>CRM 人工验证已处理</b>',
@@ -63,11 +38,47 @@ export class TelegramNotifyService {
       '认证已恢复，抓取任务将自动继续。',
     ].join('\n');
 
-    try {
-      await this.sendMessage(botToken, chatId, text);
-      this.logger.log(`已发送验证恢复通知 → ${profile.name} (${crmUrl})`);
-    } catch (err: any) {
-      this.logger.error(`Telegram 通知失败: ${err.message}`);
+    await this.broadcast(text, `验证恢复通知 → ${profile.name} (${crmUrl})`);
+  }
+
+  private getConfig(): { botToken: string; chatIds: string[] } | null {
+    const botToken = this.configService.get<string>('telegram.botToken') ?? '';
+    const chatIds = this.configService.get<string[]>('telegram.chatIds') ?? [];
+
+    if (!botToken || chatIds.length === 0) {
+      this.logger.debug(
+        'Telegram 未配置（TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_IDS），跳过通知',
+      );
+      return null;
+    }
+
+    return { botToken, chatIds };
+  }
+
+  private async broadcast(text: string, successLog: string): Promise<void> {
+    const config = this.getConfig();
+    if (!config) return;
+
+    const results = await Promise.allSettled(
+      config.chatIds.map((chatId) =>
+        this.sendMessage(config.botToken, chatId, text),
+      ),
+    );
+
+    let sent = 0;
+    results.forEach((result, index) => {
+      const chatId = config.chatIds[index];
+      if (result.status === 'fulfilled') {
+        sent++;
+        return;
+      }
+      this.logger.error(
+        `Telegram 通知失败 chat_id=${chatId}: ${result.reason?.message ?? result.reason}`,
+      );
+    });
+
+    if (sent > 0) {
+      this.logger.log(`已发送 ${successLog}（${sent}/${config.chatIds.length}）`);
     }
   }
 
@@ -122,7 +133,10 @@ export class TelegramNotifyService {
               return;
             }
             try {
-              const parsed = JSON.parse(raw) as { ok?: boolean; description?: string };
+              const parsed = JSON.parse(raw) as {
+                ok?: boolean;
+                description?: string;
+              };
               if (!parsed.ok) {
                 reject(new Error(parsed.description || raw));
                 return;
