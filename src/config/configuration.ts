@@ -35,4 +35,8 @@ export default () => ({
     username: process.env.CRAWL_ADMIN_USERNAME || '',
     password: process.env.CRAWL_ADMIN_PASSWORD || '',
   },
+  telegram: {
+    botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+    chatId: process.env.TELEGRAM_CHAT_ID || '',
+  },
 });

@@ -6,6 +6,7 @@ import { CrawlProfileService } from './crawl-profile.service';
 import { CrmAuthService } from './crm-auth.service';
 import { CrmRequestRunnerService } from './crm-request-runner.service';
 import { CrmRequestSchedulerService } from './crm-request-scheduler.service';
+import { TelegramNotifyService } from './telegram-notify.service';
 import { PluginDataModule } from '../plugin-data/plugin-data.module';
 import { VoiceTableModule } from '../voice-table/voice-table.module';
 
@@ -21,6 +22,7 @@ import { VoiceTableModule } from '../voice-table/voice-table.module';
     CrmAuthService,
     CrmRequestRunnerService,
     CrmRequestSchedulerService,
+    TelegramNotifyService,
   ],
   exports: [CrmAuthService],
 })

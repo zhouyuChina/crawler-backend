@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import * as http from 'http';
 import * as https from 'https';
 import { AuthStatus, CrawlProfile } from './crawl-profile.entity';
+import { TelegramNotifyService } from './telegram-notify.service';
 
 interface LoginResult {
   success: boolean;
@@ -26,6 +27,7 @@ export class CrmAuthService {
   constructor(
     @InjectRepository(CrawlProfile)
     private readonly profileRepo: Repository<CrawlProfile>,
+    private readonly telegramNotify: TelegramNotifyService,
   ) {}
 
   registerCookiesSyncedCallback(cb: (profileId: string) => void) {
@@ -45,11 +47,11 @@ export class CrmAuthService {
         cookies: result.cookies,
         expiresAt: Date.now() + COOKIE_TTL_MS,
       });
-      await this.updateAuthStatus(profile.id, result.authStatus);
+      await this.updateAuthStatus(profile, result.authStatus);
       return result.cookies;
     }
 
-    await this.updateAuthStatus(profile.id, result.authStatus, result.error);
+    await this.updateAuthStatus(profile, result.authStatus, result.error);
     return null;
   }
 
@@ -57,7 +59,7 @@ export class CrmAuthService {
   async forceLogin(profile: CrawlProfile): Promise<LoginResult> {
     const cached = cookieCache.get(profile.id);
     if (cached && Date.now() < cached.expiresAt) {
-      await this.updateAuthStatus(profile.id, 'ok');
+      await this.updateAuthStatus(profile, 'ok');
       return {
         success: true,
         cookies: cached.cookies,
@@ -74,7 +76,7 @@ export class CrmAuthService {
       });
       this.onCookiesSynced?.(profile.id);
     }
-    await this.updateAuthStatus(profile.id, result.authStatus, result.error);
+    await this.updateAuthStatus(profile, result.authStatus, result.error);
     return result;
   }
 
@@ -110,10 +112,10 @@ export class CrmAuthService {
     ) {
       for (const profile of matchedProfiles) {
         this.invalidateCookies(profile.id);
-        await this.profileRepo.update(profile.id, {
-          authStatus: 'human_check_required',
-          lastError: '插件 Cookie 已失效，请重新在浏览器完成登录/验证',
-        });
+        await this.markHumanCheckRequired(
+          profile,
+          '插件 Cookie 已失效，请重新在浏览器完成登录/验证',
+        );
         this.logger.warn(
           `插件 Cookie 失效 → ${profile.name} (${profile.baseUrl})`,
         );
@@ -125,11 +127,7 @@ export class CrmAuthService {
 
     for (const profile of matchedProfiles) {
       this.setPluginCookies(profile.id, cookies);
-      await this.profileRepo.update(profile.id, {
-        authStatus: 'ok',
-        lastError: null,
-        lastLoginAt: new Date(),
-      });
+      await this.markAuthOk(profile);
       // 清掉该配置的调度状态，让所有任务（包括表格）在下一次 tick 立即重跑
       this.onCookiesSynced?.(profile.id);
       matched++;
@@ -282,16 +280,54 @@ export class CrmAuthService {
       .join('; ');
   }
 
+  private async markAuthOk(profile: CrawlProfile): Promise<void> {
+    const wasHumanCheck = profile.authStatus === 'human_check_required';
+    await this.profileRepo.update(profile.id, {
+      authStatus: 'ok',
+      lastError: null,
+      lastLoginAt: new Date(),
+    });
+    if (wasHumanCheck) {
+      void this.telegramNotify.notifyHumanCheckResolved(profile);
+    }
+  }
+
+  private async markHumanCheckRequired(
+    profile: CrawlProfile,
+    error: string,
+  ): Promise<void> {
+    const shouldNotify = profile.authStatus !== 'human_check_required';
+    await this.profileRepo.update(profile.id, {
+      authStatus: 'human_check_required',
+      lastError: error,
+    });
+    if (shouldNotify) {
+      void this.telegramNotify.notifyHumanCheckRequired(profile);
+    }
+  }
+
   private async updateAuthStatus(
-    id: string,
+    profile: CrawlProfile,
     authStatus: AuthStatus,
     error?: string,
   ) {
-    await this.profileRepo.update(id, {
+    const shouldNotifyRequired =
+      authStatus === 'human_check_required' &&
+      profile.authStatus !== 'human_check_required';
+    const shouldNotifyResolved =
+      authStatus === 'ok' && profile.authStatus === 'human_check_required';
+
+    await this.profileRepo.update(profile.id, {
       authStatus,
       lastError: error ?? null,
       ...(authStatus === 'ok' ? { lastLoginAt: new Date() } : {}),
     });
+
+    if (shouldNotifyRequired) {
+      void this.telegramNotify.notifyHumanCheckRequired(profile);
+    } else if (shouldNotifyResolved) {
+      void this.telegramNotify.notifyHumanCheckResolved(profile);
+    }
   }
 
   // ──────────────────── http helpers ────────────────────
