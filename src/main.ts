@@ -61,5 +61,6 @@ async function bootstrap() {
   console.log(`API endpoints: http://localhost:${port}/api`);
   console.log(`WebSocket: ws://localhost:${port}/ws`);
   console.log(`Monitor page: http://localhost:${port}/api/monitor`);
+  console.log(`Crawl profiles: http://localhost:${port}/api/crawl-profiles/page`);
 }
 bootstrap();

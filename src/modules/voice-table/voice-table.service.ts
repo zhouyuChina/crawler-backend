@@ -11,6 +11,10 @@ import { VoiceIvrSummary } from './entities/voice-ivr-summary.entity';
 import { VoiceOpRecord } from './entities/voice-op-record.entity';
 import { VoiceOpSummary } from './entities/voice-op-summary.entity';
 import {
+  VoiceCrawlState,
+  CrawlStateStatus,
+} from './entities/voice-crawl-state.entity';
+import {
   ensurePageIdParam,
   extractMid,
   resolveStrategy,
@@ -63,6 +67,8 @@ export class VoiceTableService {
     private readonly opRecordRepo: Repository<VoiceOpRecord>,
     @InjectRepository(VoiceOpSummary)
     private readonly opSummaryRepo: Repository<VoiceOpSummary>,
+    @InjectRepository(VoiceCrawlState)
+    private readonly crawlStateRepo: Repository<VoiceCrawlState>,
     private readonly ws: WebsocketGateway,
   ) {}
 
@@ -92,6 +98,15 @@ export class VoiceTableService {
       firstHtml = await this.fetchHtml(firstUrl, headers);
     } catch (err: any) {
       this.logger.error(`首页抓取失败 ${key}: ${err.message}`);
+      this.ws.broadcastVoiceTableProgress({
+        module: strategy.module,
+        mid,
+        taskId,
+        page: 1,
+        pagesToFetch: 0,
+        status: 'failed',
+        error: `fetch first page failed: ${err.message}`,
+      });
       return {
         success: false,
         message: `fetch first page failed: ${err.message}`,
@@ -104,24 +119,48 @@ export class VoiceTableService {
       `首页解析 ${key}: html=${firstHtml.length}b rows=${firstParsed.rows.length} totalPages=${newTotalPages}`,
     );
 
-    const lastTotalPages = await this.getLastTotalPages(strategy.module, mid);
+    // 加载持久化的抓取状态，判断是否断点续抓
+    const crawlState = await this.crawlStateRepo.findOne({
+      where: { module: strategy.module, mid },
+    });
+    const isIncomplete =
+      crawlState &&
+      crawlState.status !== 'completed' &&
+      crawlState.lastCompletedPage > 0;
+
     let pagesToFetch: number;
-    if (lastTotalPages == null || newTotalPages < lastTotalPages) {
-      pagesToFetch = newTotalPages;
-    } else {
-      pagesToFetch = Math.max(
-        MIN_DETAIL_PAGES_PER_RUN,
-        newTotalPages - lastTotalPages + 1,
+    let resumeFromPage: number;
+
+    if (isIncomplete) {
+      // 上次中断：从上次完成页的下一页续抓，以最新 totalPages 为终点
+      resumeFromPage = crawlState.lastCompletedPage + 1;
+      pagesToFetch = Math.max(crawlState.totalPages, newTotalPages);
+      this.logger.log(
+        `断点续抓 ${key}: 从第 ${resumeFromPage} 页开始, 目标共 ${pagesToFetch} 页`,
       );
+    } else {
+      // 正常增量抓取
+      resumeFromPage = 2;
+      const lastTotalPages = await this.getLastTotalPages(strategy.module, mid);
+      if (lastTotalPages == null || newTotalPages < lastTotalPages) {
+        pagesToFetch = newTotalPages;
+      } else {
+        pagesToFetch = Math.max(
+          MIN_DETAIL_PAGES_PER_RUN,
+          newTotalPages - lastTotalPages + 1,
+        );
+      }
+      pagesToFetch = Math.min(pagesToFetch, newTotalPages);
     }
-    pagesToFetch = Math.min(pagesToFetch, newTotalPages);
+
     const detailBusy = this.activeMap.get(key) === true;
     const lastDetailStart = this.throttleMap.get(key) ?? 0;
     const detailRetryAfterMs = Math.max(
       0,
       THROTTLE_MS - (now - lastDetailStart),
     );
-    const detailThrottled = detailRetryAfterMs > 0;
+    // 有未完成页时跳过节流，确保能续抓
+    const detailThrottled = !isIncomplete && detailRetryAfterMs > 0;
 
     // 写入第一页行 + WS 推送
     const insertedFirst = await this.persistRows(
@@ -165,6 +204,15 @@ export class VoiceTableService {
       taskId,
     );
 
+    // 更新抓取状态：标记 running，第 1 页已完成
+    await this.upsertCrawlState(strategy.module, mid, {
+      totalPages: pagesToFetch,
+      lastCompletedPage: isIncomplete
+        ? crawlState.lastCompletedPage
+        : Math.min(1, pagesToFetch),
+      status: 'running',
+    });
+
     if (detailBusy) {
       this.logger.log(`明细任务运行中, 仅刷新 summary ${key}`);
       return {
@@ -185,6 +233,7 @@ export class VoiceTableService {
           detailRetryAfterMs / 1000,
         )}s`,
       );
+      await this.upsertCrawlState(strategy.module, mid, { status: 'failed' });
       return {
         success: true,
         module: strategy.module,
@@ -197,8 +246,8 @@ export class VoiceTableService {
       };
     }
 
-    // 第 2..N 页异步循环
-    if (pagesToFetch > 1) {
+    // 第 resumeFromPage..pagesToFetch 页异步循环
+    if (resumeFromPage <= pagesToFetch) {
       this.throttleMap.set(key, now);
       this.activeMap.set(key, true);
       void this.runRemainingPages({
@@ -207,6 +256,7 @@ export class VoiceTableService {
         baseUrl: input.url,
         headers,
         pagesToFetch,
+        resumeFromPage,
         taskId,
         key,
       })
@@ -216,6 +266,12 @@ export class VoiceTableService {
         .finally(() => {
           this.activeMap.delete(key);
         });
+    } else {
+      // 没有后续页需要抓（resumeFromPage > pagesToFetch 说明已全部完成）
+      await this.upsertCrawlState(strategy.module, mid, {
+        status: 'completed',
+        lastCompletedPage: pagesToFetch,
+      });
     }
 
     return {
@@ -236,13 +292,24 @@ export class VoiceTableService {
     baseUrl: string;
     headers: Headers;
     pagesToFetch: number;
+    /** 从哪页开始（断点续抓时 > 2） */
+    resumeFromPage: number;
     taskId: string;
     key: string;
   }): Promise<void> {
-    const { strategy, mid, baseUrl, headers, pagesToFetch, taskId, key } = args;
+    const {
+      strategy,
+      mid,
+      baseUrl,
+      headers,
+      pagesToFetch,
+      resumeFromPage,
+      taskId,
+      key,
+    } = args;
     const failedPages: Array<{ page: number; error: string }> = [];
 
-    for (let page = 2; page <= pagesToFetch; page++) {
+    for (let page = resumeFromPage; page <= pagesToFetch; page++) {
       try {
         await this.crawlPage({
           strategy,
@@ -252,6 +319,11 @@ export class VoiceTableService {
           page,
           pagesToFetch,
           taskId,
+        });
+        // 每页完成后持久化进度
+        await this.upsertCrawlState(strategy.module, mid, {
+          lastCompletedPage: page,
+          status: page < pagesToFetch ? 'running' : 'completed',
         });
       } catch (err: any) {
         const message = err.message || String(err);
@@ -285,6 +357,9 @@ export class VoiceTableService {
           pagesToFetch,
           taskId,
         });
+        await this.upsertCrawlState(strategy.module, mid, {
+          lastCompletedPage: failed.page,
+        });
       } catch (err: any) {
         const message = err.message || String(err);
         this.logger.error(`补抓 page=${failed.page} 失败 ${key}: ${message}`);
@@ -299,6 +374,9 @@ export class VoiceTableService {
         });
       }
     }
+
+    // 补抓完成后标记整体状态
+    await this.upsertCrawlState(strategy.module, mid, { status: 'completed' });
   }
 
   private async crawlPage(args: {
@@ -441,6 +519,19 @@ export class VoiceTableService {
 
     if (strategy.module === 'voice_ivr') {
       const s = summary as ParsedSummaryVoiceIvr;
+      const last = await this.ivrSummaryRepo.findOne({
+        where: { mid },
+        order: { capturedAt: 'DESC' },
+      });
+
+      if (last && this.isSameIvrSummary(last, s, totalPages)) {
+        await this.ivrSummaryRepo.update(last.id, { capturedAt });
+        this.logger.debug(
+          `summary 未变化, 更新时间 voice_ivr:${mid} -> ${capturedAt.toISOString()}`,
+        );
+        return;
+      }
+
       const e = new VoiceIvrSummary();
       e.id = uuidv4();
       e.mid = mid;
@@ -455,6 +546,24 @@ export class VoiceTableService {
       await this.ivrSummaryRepo.save(e);
     } else {
       const s = summary as ParsedSummaryVoiceOp;
+      const last = await this.opSummaryRepo.findOne({
+        where: { mid },
+        order: { capturedAt: 'DESC' },
+      });
+      const connectRate = s.connectRate.toFixed(2);
+      const callbackRate = s.callbackRate.toFixed(2);
+
+      if (
+        last &&
+        this.isSameOpSummary(last, s, totalPages, connectRate, callbackRate)
+      ) {
+        await this.opSummaryRepo.update(last.id, { capturedAt });
+        this.logger.debug(
+          `summary 未变化, 更新时间 voice_op:${mid} -> ${capturedAt.toISOString()}`,
+        );
+        return;
+      }
+
       const e = new VoiceOpSummary();
       e.id = uuidv4();
       e.mid = mid;
@@ -463,8 +572,8 @@ export class VoiceTableService {
       e.ringing = s.ringing;
       e.connected = s.connected;
       e.agentCount = s.agentCount;
-      e.connectRate = s.connectRate.toFixed(2);
-      e.callbackRate = s.callbackRate.toFixed(2);
+      e.connectRate = connectRate;
+      e.callbackRate = callbackRate;
       e.totalPages = totalPages;
       e.sourceUrl = sourceUrl;
       e.capturedAt = capturedAt;
@@ -480,6 +589,40 @@ export class VoiceTableService {
       capturedAt: capturedAt.toISOString(),
       taskId,
     });
+  }
+
+  private isSameIvrSummary(
+    last: VoiceIvrSummary,
+    next: ParsedSummaryVoiceIvr,
+    totalPages: number,
+  ): boolean {
+    return (
+      last.totalRecords === next.totalRecords &&
+      last.connectFail === next.connectFail &&
+      last.busy === next.busy &&
+      last.noAnswer === next.noAnswer &&
+      last.connected === next.connected &&
+      last.totalPages === totalPages
+    );
+  }
+
+  private isSameOpSummary(
+    last: VoiceOpSummary,
+    next: ParsedSummaryVoiceOp,
+    totalPages: number,
+    connectRate: string,
+    callbackRate: string,
+  ): boolean {
+    return (
+      last.totalRecords === next.totalRecords &&
+      last.initCount === next.initCount &&
+      last.ringing === next.ringing &&
+      last.connected === next.connected &&
+      last.agentCount === next.agentCount &&
+      String(last.connectRate) === connectRate &&
+      String(last.callbackRate) === callbackRate &&
+      last.totalPages === totalPages
+    );
   }
 
   private normalizeHeaders(
@@ -561,6 +704,29 @@ export class VoiceTableService {
       });
       req.end();
     });
+  }
+
+  /** 插入或更新 VoiceCrawlState（以 module+mid 为 key） */
+  private async upsertCrawlState(
+    module: string,
+    mid: number,
+    update: Partial<Pick<VoiceCrawlState, 'totalPages' | 'lastCompletedPage' | 'status'>>,
+  ): Promise<void> {
+    const existing = await this.crawlStateRepo.findOne({
+      where: { module, mid },
+    });
+    if (existing) {
+      await this.crawlStateRepo.update(existing.id, update);
+    } else {
+      const s = new VoiceCrawlState();
+      s.id = uuidv4();
+      s.module = module;
+      s.mid = mid;
+      s.totalPages = update.totalPages ?? 1;
+      s.lastCompletedPage = update.lastCompletedPage ?? 0;
+      s.status = (update.status ?? 'running') as CrawlStateStatus;
+      await this.crawlStateRepo.save(s);
+    }
   }
 }
 

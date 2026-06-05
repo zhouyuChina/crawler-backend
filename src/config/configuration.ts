@@ -31,4 +31,8 @@ export default () => ({
     origin: process.env.CORS_ORIGIN || '*',
     credentials: true,
   },
+  crawlAdmin: {
+    username: process.env.CRAWL_ADMIN_USERNAME || '',
+    password: process.env.CRAWL_ADMIN_PASSWORD || '',
+  },
 });

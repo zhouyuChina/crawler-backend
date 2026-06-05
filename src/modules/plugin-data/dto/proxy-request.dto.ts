@@ -19,4 +19,9 @@ export class ProxyRequestDto {
   @IsString()
   @IsOptional()
   contentType?: string; // 请求的 Content-Type
+
+  /** 来源标识，如 browser-extension-proxy / crawl-profile-scheduler */
+  @IsString()
+  @IsOptional()
+  sourcePluginId?: string;
 }

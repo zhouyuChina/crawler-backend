@@ -7,6 +7,7 @@ import { VoiceIvrRecord } from './entities/voice-ivr-record.entity';
 import { VoiceIvrSummary } from './entities/voice-ivr-summary.entity';
 import { VoiceOpRecord } from './entities/voice-op-record.entity';
 import { VoiceOpSummary } from './entities/voice-op-summary.entity';
+import { VoiceCrawlState } from './entities/voice-crawl-state.entity';
 import { WebsocketModule } from '../websocket/websocket.module';
 
 @Module({
@@ -16,6 +17,7 @@ import { WebsocketModule } from '../websocket/websocket.module';
       VoiceIvrSummary,
       VoiceOpRecord,
       VoiceOpSummary,
+      VoiceCrawlState,
     ]),
     WebsocketModule,
   ],

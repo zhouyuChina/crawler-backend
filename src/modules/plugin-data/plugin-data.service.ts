@@ -1,10 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, forwardRef } from '@nestjs/common';
 import { WebpageService } from '../webpage/webpage.service';
 import { ScreenshotService } from '../screenshot/screenshot.service';
 import { WebsocketGateway } from '../websocket/websocket.gateway';
 import { CallRecordService } from '../call-record/call-record.service';
+import { CrmAuthService } from '../crawl-profile/crm-auth.service';
 import { PluginSubmitDto } from './dto/plugin-submit.dto';
 import { ProxyRequestDto } from './dto/proxy-request.dto';
+import { v4 as uuidv4 } from 'uuid';
 import * as http from 'http';
 import * as https from 'https';
 import * as zlib from 'zlib';
@@ -16,6 +18,8 @@ export class PluginDataService {
     private readonly screenshotService: ScreenshotService,
     private readonly websocketGateway: WebsocketGateway,
     private readonly callRecordService: CallRecordService,
+    @Inject(forwardRef(() => CrmAuthService))
+    private readonly crmAuthService: CrmAuthService,
   ) {}
 
   async processPluginData(
@@ -104,6 +108,20 @@ export class PluginDataService {
    * 代理请求：服务器代表插件发起 HTTP 请求，获取响应体
    */
   async proxyRequest(dto: ProxyRequestDto) {
+    const requestId = uuidv4();
+    const timestamp = new Date().toISOString();
+    const method = dto.method || 'GET';
+    const sourcePluginId =
+      dto.sourcePluginId || 'browser-extension-proxy';
+
+    this.websocketGateway.broadcastRequestReceived({
+      id: requestId,
+      url: dto.url,
+      method,
+      timestamp,
+      status: 'processing',
+    });
+
     try {
       // 发起 HTTP/HTTPS 请求
       const responseData = await this.makeHttpRequest(dto);
@@ -146,12 +164,23 @@ export class PluginDataService {
           responseHeaders: responseData.headers,
           proxied: true,
         } as Record<string, unknown>,
-        sourcePluginId: 'browser-extension-proxy',
+        sourcePluginId,
         browserType: 'chrome',
         capturedAt: new Date(),
       });
 
       this.websocketGateway.broadcastWebpageCreated(webpage);
+
+      this.websocketGateway.broadcastRequestProcessed({
+        id: requestId,
+        url: dto.url,
+        method,
+        status: 'success',
+        message: `代理请求成功，状态码: ${responseData.statusCode}`,
+        webpageId: webpage.id,
+        responseBody: responseData.body,
+        statusCode: responseData.statusCode,
+      });
 
       // 判断是否是 call-record 类型，如果是则触发专门的事件
       const recordType = this.identifyRecordType(dto.url);
@@ -181,6 +210,18 @@ export class PluginDataService {
         }
       }
 
+      const cookieHeader = this.extractCookieHeader(dto.headers);
+      if (cookieHeader) {
+        void this.crmAuthService
+          .ingestPluginCookies(
+            dto.url,
+            cookieHeader,
+            responseData.body,
+            responseData.statusCode,
+          )
+          .catch(() => {});
+      }
+
       return {
         success: true,
         message: '代理请求成功',
@@ -189,9 +230,26 @@ export class PluginDataService {
         responseBody: responseData.body,
         responseHeaders: responseData.headers,
       };
-    } catch (error) {
+    } catch (error: any) {
+      this.websocketGateway.broadcastRequestProcessed({
+        id: requestId,
+        url: dto.url,
+        method,
+        status: 'error',
+        error: error?.message || '代理请求失败',
+      });
       throw error;
     }
+  }
+
+  private extractCookieHeader(
+    headers?: Record<string, string>,
+  ): string | undefined {
+    if (!headers) return undefined;
+    for (const [name, value] of Object.entries(headers)) {
+      if (name.toLowerCase() === 'cookie' && value) return value;
+    }
+    return undefined;
   }
 
   /**
