@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as http from 'http';
@@ -18,11 +18,14 @@ const cookieCache = new Map<string, { cookies: string; expiresAt: number }>();
 const COOKIE_TTL_MS = 30 * 60 * 1000; // 30 分钟
 
 @Injectable()
-export class CrmAuthService {
+export class CrmAuthService implements OnModuleInit {
   private readonly logger = new Logger(CrmAuthService.name);
 
   /** 由 CrmRequestSchedulerService 在初始化时注入，避免循环依赖 */
   private onCookiesSynced?: (profileId: string) => void;
+  private onAuthStatusChanged?: (profileId: string) => void;
+  /** 已发送「需人工验证」通知的 profile，恢复 ok 后清除 */
+  private readonly humanCheckNotified = new Set<string>();
 
   constructor(
     @InjectRepository(CrawlProfile)
@@ -34,11 +37,36 @@ export class CrmAuthService {
     this.onCookiesSynced = cb;
   }
 
+  registerAuthStatusChangedCallback(cb: (profileId: string) => void) {
+    this.onAuthStatusChanged = cb;
+  }
+
+  async onModuleInit() {
+    const pending = await this.profileRepo.find({
+      where: { authStatus: 'human_check_required' },
+      select: ['id'],
+    });
+    for (const profile of pending) {
+      this.humanCheckNotified.add(profile.id);
+    }
+  }
+
   /** 获取有效 Cookie，若缓存过期则重新登录 */
   async getCookies(profile: CrawlProfile): Promise<string | null> {
     const cached = cookieCache.get(profile.id);
     if (cached && Date.now() < cached.expiresAt) {
       return cached.cookies;
+    }
+
+    const fresh = await this.profileRepo.findOne({
+      where: { id: profile.id },
+      select: ['id', 'authStatus'],
+    });
+    if (
+      fresh?.authStatus === 'human_check_required' &&
+      !this.hasValidCookies(profile.id)
+    ) {
+      return null;
     }
 
     const result = await this.login(profile);
@@ -47,11 +75,11 @@ export class CrmAuthService {
         cookies: result.cookies,
         expiresAt: Date.now() + COOKIE_TTL_MS,
       });
-      await this.updateAuthStatus(profile, result.authStatus);
+      await this.updateAuthStatus(profile, result.authStatus, undefined, true);
       return result.cookies;
     }
 
-    await this.updateAuthStatus(profile, result.authStatus, result.error);
+    await this.updateAuthStatus(profile, result.authStatus, result.error, true);
     return null;
   }
 
@@ -59,7 +87,7 @@ export class CrmAuthService {
   async forceLogin(profile: CrawlProfile): Promise<LoginResult> {
     const cached = cookieCache.get(profile.id);
     if (cached && Date.now() < cached.expiresAt) {
-      await this.updateAuthStatus(profile, 'ok');
+      // 缓存命中不视为"重新登录"，不刷新 lastLoginAt
       return {
         success: true,
         cookies: cached.cookies,
@@ -76,7 +104,7 @@ export class CrmAuthService {
       });
       this.onCookiesSynced?.(profile.id);
     }
-    await this.updateAuthStatus(profile, result.authStatus, result.error);
+    await this.updateAuthStatus(profile, result.authStatus, result.error, true);
     return result;
   }
 
@@ -281,14 +309,20 @@ export class CrmAuthService {
   }
 
   private async markAuthOk(profile: CrawlProfile): Promise<void> {
-    const wasHumanCheck = profile.authStatus === 'human_check_required';
+    const current = await this.profileRepo.findOne({
+      where: { id: profile.id },
+      select: ['authStatus'],
+    });
+    const wasHumanCheck = current?.authStatus === 'human_check_required';
     await this.profileRepo.update(profile.id, {
       authStatus: 'ok',
       lastError: null,
       lastLoginAt: new Date(),
     });
+    this.humanCheckNotified.delete(profile.id);
     if (wasHumanCheck) {
       void this.telegramNotify.notifyHumanCheckResolved(profile);
+      this.onAuthStatusChanged?.(profile.id);
     }
   }
 
@@ -296,13 +330,20 @@ export class CrmAuthService {
     profile: CrawlProfile,
     error: string,
   ): Promise<void> {
-    const shouldNotify = profile.authStatus !== 'human_check_required';
+    const current = await this.profileRepo.findOne({
+      where: { id: profile.id },
+      select: ['authStatus'],
+    });
+    const wasAlready = current?.authStatus === 'human_check_required';
+
     await this.profileRepo.update(profile.id, {
       authStatus: 'human_check_required',
       lastError: error,
     });
-    if (shouldNotify) {
-      void this.telegramNotify.notifyHumanCheckRequired(profile);
+
+    if (!wasAlready) {
+      void this.notifyHumanCheckRequiredOnce(profile);
+      this.onAuthStatusChanged?.(profile.id);
     }
   }
 
@@ -310,24 +351,42 @@ export class CrmAuthService {
     profile: CrawlProfile,
     authStatus: AuthStatus,
     error?: string,
+    /** 只有真正发起过登录请求时才传 true，从缓存命中不传 */
+    actualLogin = false,
   ) {
+    const current = await this.profileRepo.findOne({
+      where: { id: profile.id },
+      select: ['authStatus'],
+    });
+    const previousStatus = current?.authStatus ?? profile.authStatus;
     const shouldNotifyRequired =
       authStatus === 'human_check_required' &&
-      profile.authStatus !== 'human_check_required';
+      previousStatus !== 'human_check_required';
     const shouldNotifyResolved =
-      authStatus === 'ok' && profile.authStatus === 'human_check_required';
+      authStatus === 'ok' && previousStatus === 'human_check_required';
 
     await this.profileRepo.update(profile.id, {
       authStatus,
       lastError: error ?? null,
-      ...(authStatus === 'ok' ? { lastLoginAt: new Date() } : {}),
+      ...(authStatus === 'ok' && actualLogin ? { lastLoginAt: new Date() } : {}),
     });
 
     if (shouldNotifyRequired) {
-      void this.telegramNotify.notifyHumanCheckRequired(profile);
+      void this.notifyHumanCheckRequiredOnce(profile);
     } else if (shouldNotifyResolved) {
+      this.humanCheckNotified.delete(profile.id);
       void this.telegramNotify.notifyHumanCheckResolved(profile);
     }
+
+    if (shouldNotifyRequired || shouldNotifyResolved) {
+      this.onAuthStatusChanged?.(profile.id);
+    }
+  }
+
+  private notifyHumanCheckRequiredOnce(profile: CrawlProfile): void {
+    if (this.humanCheckNotified.has(profile.id)) return;
+    this.humanCheckNotified.add(profile.id);
+    void this.telegramNotify.notifyHumanCheckRequired(profile);
   }
 
   // ──────────────────── http helpers ────────────────────

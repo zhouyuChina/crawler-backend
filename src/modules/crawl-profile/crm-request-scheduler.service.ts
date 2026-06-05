@@ -61,6 +61,9 @@ export class CrmRequestSchedulerService implements OnModuleInit, OnModuleDestroy
     this.crmAuthService.registerCookiesSyncedCallback((id) =>
       this.invalidateProfile(id),
     );
+    this.crmAuthService.registerAuthStatusChangedCallback(() =>
+      this.refreshProfilesCache(),
+    );
   }
 
   onModuleDestroy() {
