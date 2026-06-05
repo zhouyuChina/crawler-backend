@@ -313,14 +313,17 @@ export class CrmAuthService implements OnModuleInit {
       where: { id: profile.id },
       select: ['authStatus'],
     });
-    const wasHumanCheck = current?.authStatus === 'human_check_required';
+    const previousStatus = current?.authStatus ?? profile.authStatus;
+    const wasNotOk = previousStatus !== 'ok';
+
     await this.profileRepo.update(profile.id, {
       authStatus: 'ok',
       lastError: null,
-      lastLoginAt: new Date(),
+      // 只有从非 ok 状态恢复时才刷新登录时间，常规 Cookie 同步不计为"登录"
+      ...(wasNotOk ? { lastLoginAt: new Date() } : {}),
     });
     this.humanCheckNotified.delete(profile.id);
-    if (wasHumanCheck) {
+    if (previousStatus === 'human_check_required') {
       void this.telegramNotify.notifyHumanCheckResolved(profile);
       this.onAuthStatusChanged?.(profile.id);
     }
