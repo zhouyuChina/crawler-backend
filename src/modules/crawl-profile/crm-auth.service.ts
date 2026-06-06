@@ -195,6 +195,16 @@ export class CrmAuthService implements OnModuleInit {
     cookieCache.delete(profileId);
   }
 
+  /** 请求成功说明当前 Cookie 仍有效，续期缓存，避免固定 TTL 到点后主动重新登录 */
+  touchCookies(profileId: string): void {
+    const cached = cookieCache.get(profileId);
+    if (!cached) return;
+    cookieCache.set(profileId, {
+      cookies: cached.cookies,
+      expiresAt: Date.now() + COOKIE_TTL_MS,
+    });
+  }
+
   /** 内存中是否有未过期的 Cookie（含插件同步） */
   hasValidCookies(profileId: string): boolean {
     const cached = cookieCache.get(profileId);

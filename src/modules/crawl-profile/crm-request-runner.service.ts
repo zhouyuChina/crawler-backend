@@ -109,20 +109,27 @@ export class CrmRequestRunnerService {
         if (!result.success) {
           throw new Error(result.message || 'table crawl failed');
         }
+        this.crmAuthService.touchCookies(profile.id);
         this.logger.debug(`${profile.name}(${taskKey}): 表格抓取已触发`);
       } else {
-        await this.pluginDataService.proxyRequest({
+        const result = await this.pluginDataService.proxyRequest({
           url,
           method: 'GET',
           headers,
           sourcePluginId: 'crawl-profile-scheduler',
         });
+        if ((result.statusCode ?? 0) >= 400) {
+          throw new Error(`HTTP ${result.statusCode}: ${url}`);
+        }
+        this.crmAuthService.touchCookies(profile.id);
         this.logger.debug(`${profile.name}(${taskKey}): 普通请求完成`);
       }
     } catch (err: any) {
       // Cookie 可能过期，下次重新登录
       if (
         err.message?.includes('302') ||
+        err.message?.includes('HTTP 401') ||
+        err.message?.includes('HTTP 403') ||
         err.message?.includes('login') ||
         err.message?.includes('unauthorized')
       ) {
