@@ -308,6 +308,7 @@ export class VoiceTableService {
       key,
     } = args;
     const failedPages: Array<{ page: number; error: string }> = [];
+    let authAborted = false;
 
     for (let page = resumeFromPage; page <= pagesToFetch; page++) {
       try {
@@ -327,6 +328,26 @@ export class VoiceTableService {
         });
       } catch (err: any) {
         const message = err.message || String(err);
+
+        // 401/403 = Cookie 已失效，立刻中止，不继续也不补抓
+        if (this.isAuthError(message)) {
+          this.logger.warn(
+            `Cookie 失效（${message}），中止后续抓取 ${key}，等待重新登录`,
+          );
+          this.ws.broadcastVoiceTableProgress({
+            module: strategy.module,
+            mid,
+            taskId,
+            page,
+            pagesToFetch,
+            status: 'failed',
+            error: `Cookie 失效，已中止: ${message}`,
+          });
+          await this.upsertCrawlState(strategy.module, mid, { status: 'failed' });
+          authAborted = true;
+          break;
+        }
+
         failedPages.push({ page, error: message });
         this.logger.warn(`抓取 page=${page} 失败, 稍后重试 ${key}: ${message}`);
         this.ws.broadcastVoiceTableProgress({
@@ -345,6 +366,8 @@ export class VoiceTableService {
       }
     }
 
+    if (authAborted) return;
+
     for (const failed of failedPages) {
       try {
         this.logger.log(`补抓 page=${failed.page} ${key}`);
@@ -362,6 +385,11 @@ export class VoiceTableService {
         });
       } catch (err: any) {
         const message = err.message || String(err);
+        if (this.isAuthError(message)) {
+          this.logger.warn(`补抓时 Cookie 失效，中止 ${key}`);
+          await this.upsertCrawlState(strategy.module, mid, { status: 'failed' });
+          return;
+        }
         this.logger.error(`补抓 page=${failed.page} 失败 ${key}: ${message}`);
         this.ws.broadcastVoiceTableProgress({
           module: strategy.module,
@@ -704,6 +732,11 @@ export class VoiceTableService {
       });
       req.end();
     });
+  }
+
+  /** 判断是否为认证失败错误（401/403），这类错误不应重试 */
+  private isAuthError(message: string): boolean {
+    return /HTTP (401|403)/.test(message);
   }
 
   /** 插入或更新 VoiceCrawlState（以 module+mid 为 key） */

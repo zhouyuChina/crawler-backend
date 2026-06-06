@@ -17,6 +17,9 @@ interface LoginResult {
 const cookieCache = new Map<string, { cookies: string; expiresAt: number }>();
 const COOKIE_TTL_MS = 30 * 60 * 1000; // 30 分钟
 
+/** 登录锁：同一 profile 同时只允许一个登录请求在飞，避免并发重复登录 */
+const loginLock = new Map<string, Promise<string | null>>();
+
 @Injectable()
 export class CrmAuthService implements OnModuleInit {
   private readonly logger = new Logger(CrmAuthService.name);
@@ -51,13 +54,27 @@ export class CrmAuthService implements OnModuleInit {
     }
   }
 
-  /** 获取有效 Cookie，若缓存过期则重新登录 */
+  /** 获取有效 Cookie，若缓存过期则重新登录（同一 profile 加锁，避免并发重复登录） */
   async getCookies(profile: CrawlProfile): Promise<string | null> {
     const cached = cookieCache.get(profile.id);
     if (cached && Date.now() < cached.expiresAt) {
       return cached.cookies;
     }
 
+    // 已有登录请求在飞：等待它的结果，不重复发起
+    const existing = loginLock.get(profile.id);
+    if (existing) {
+      return existing;
+    }
+
+    const promise = this.doLogin(profile).finally(() => {
+      loginLock.delete(profile.id);
+    });
+    loginLock.set(profile.id, promise);
+    return promise;
+  }
+
+  private async doLogin(profile: CrawlProfile): Promise<string | null> {
     const fresh = await this.profileRepo.findOne({
       where: { id: profile.id },
       select: ['id', 'authStatus'],
