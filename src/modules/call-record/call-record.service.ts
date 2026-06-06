@@ -163,6 +163,22 @@ export class CallRecordService {
   }
 
   /**
+   * 重复轮询不落库时，仍刷新通话心跳，避免前端误判通话结束。
+   */
+  recordCallHeartbeat(recordType: string) {
+    if (!this.CALL_TYPES.includes(recordType)) {
+      return;
+    }
+
+    const activeCall = this.activeCalls.get(recordType);
+    if (!activeCall) {
+      return;
+    }
+
+    activeCall.lastUpdate = new Date();
+  }
+
+  /**
    * 判断是否应该广播此记录（去重逻辑）
    * @param recordType 记录类型
    * @param content 记录内容
@@ -254,7 +270,10 @@ export class CallRecordService {
         res.setHeader('Content-Length', upstream.headers['content-length']);
       }
       if (upstream.headers['content-disposition']) {
-        res.setHeader('Content-Disposition', upstream.headers['content-disposition']);
+        res.setHeader(
+          'Content-Disposition',
+          upstream.headers['content-disposition'],
+        );
       }
 
       // 流式转发

@@ -11,8 +11,13 @@ import * as http from 'http';
 import * as https from 'https';
 import * as zlib from 'zlib';
 
+const DUPLICATE_WEBPAGE_SAMPLE_MS = 60 * 1000;
+
 @Injectable()
 export class PluginDataService {
+  private readonly lastPersistedContents = new Map<string, string>();
+  private readonly lastDuplicateSampleAt = new Map<string, number>();
+
   constructor(
     private readonly webpageService: WebpageService,
     private readonly screenshotService: ScreenshotService,
@@ -111,8 +116,7 @@ export class PluginDataService {
     const requestId = uuidv4();
     const timestamp = new Date().toISOString();
     const method = dto.method || 'GET';
-    const sourcePluginId =
-      dto.sourcePluginId || 'browser-extension-proxy';
+    const sourcePluginId = dto.sourcePluginId || 'browser-extension-proxy';
 
     this.websocketGateway.broadcastRequestReceived({
       id: requestId,
@@ -149,64 +153,84 @@ export class PluginDataService {
         }
       }
 
-      // 存储到数据库
-      const webpage = await this.webpageService.create({
-        url: dto.url,
-        title: `${dto.method || 'GET'} - ${dto.url}`,
-        content,
-        htmlContent,
-        domain,
-        metadata: {
-          description: `Proxied ${dto.method || 'GET'} request to ${dto.url}`,
-          requestMethod: dto.method || 'GET',
-          statusCode: responseData.statusCode,
-          requestHeaders: dto.headers,
-          responseHeaders: responseData.headers,
-          proxied: true,
-        } as Record<string, unknown>,
-        sourcePluginId,
-        browserType: 'chrome',
-        capturedAt: new Date(),
-      });
+      const recordType = this.identifyRecordType(dto.url);
+      const responseContent = content || htmlContent;
+      const shouldPersistWebpage = this.shouldPersistWebpage(
+        recordType,
+        responseContent,
+      );
 
-      this.websocketGateway.broadcastWebpageCreated(webpage);
+      const webpage = shouldPersistWebpage
+        ? await this.webpageService.create({
+            url: dto.url,
+            title: `${dto.method || 'GET'} - ${dto.url}`,
+            content,
+            htmlContent,
+            domain,
+            metadata: {
+              description: `Proxied ${dto.method || 'GET'} request to ${dto.url}`,
+              requestMethod: dto.method || 'GET',
+              statusCode: responseData.statusCode,
+              requestHeaders: dto.headers,
+              responseHeaders: responseData.headers,
+              proxied: true,
+            } as Record<string, unknown>,
+            sourcePluginId,
+            browserType: 'chrome',
+            capturedAt: new Date(),
+          })
+        : null;
+
+      if (webpage) {
+        this.websocketGateway.broadcastWebpageCreated(webpage);
+      }
 
       this.websocketGateway.broadcastRequestProcessed({
         id: requestId,
         url: dto.url,
         method,
         status: 'success',
-        message: `代理请求成功，状态码: ${responseData.statusCode}`,
-        webpageId: webpage.id,
+        message: webpage
+          ? `代理请求成功，状态码: ${responseData.statusCode}`
+          : `代理请求成功，状态码: ${responseData.statusCode}（重复内容未落库）`,
+        webpageId: webpage?.id,
         responseBody: responseData.body,
         statusCode: responseData.statusCode,
       });
 
       // 判断是否是 call-record 类型，如果是则触发专门的事件
-      const recordType = this.identifyRecordType(dto.url);
       if (recordType) {
-        // 记录通话更新时间（用于判断通话是否结束）
-        this.callRecordService.recordCallUpdate(recordType, webpage.id);
+        if (webpage) {
+          // 记录通话更新时间（用于判断通话是否结束）
+          if (!this.hasNoCallRecord(responseContent)) {
+            this.callRecordService.recordCallUpdate(recordType, webpage.id);
+          }
 
-        // 检查是否与最新记录重复
-        const shouldBroadcast =
-          await this.callRecordService.shouldBroadcastRecord(
-            recordType,
-            webpage.content || webpage.htmlContent,
-            webpage.id,
-          );
+          // 检查是否与最新记录重复
+          const shouldBroadcast =
+            await this.callRecordService.shouldBroadcastRecord(
+              recordType,
+              webpage.content || webpage.htmlContent,
+              webpage.id,
+            );
 
-        if (shouldBroadcast) {
-          this.websocketGateway.broadcastCallRecordCreated({
-            id: webpage.id,
-            recordType,
-            url: webpage.url,
-            content: webpage.content || webpage.htmlContent,
-            statusCode: responseData.statusCode,
-            timestamp: webpage.createdAt.toISOString(),
-          });
+          if (shouldBroadcast) {
+            this.websocketGateway.broadcastCallRecordCreated({
+              id: webpage.id,
+              recordType,
+              url: webpage.url,
+              content: webpage.content || webpage.htmlContent,
+              statusCode: responseData.statusCode,
+              timestamp: webpage.createdAt.toISOString(),
+            });
+          } else {
+            console.log(`⏭️  跳过重复记录推送: ${recordType} (${webpage.id})`);
+          }
         } else {
-          console.log(`⏭️  跳过重复记录推送: ${recordType} (${webpage.id})`);
+          if (!this.hasNoCallRecord(responseContent)) {
+            this.callRecordService.recordCallHeartbeat(recordType);
+          }
+          console.log(`⏭️  跳过重复网页落库: ${recordType}`);
         }
       }
 
@@ -226,7 +250,8 @@ export class PluginDataService {
       return {
         success: true,
         message: '代理请求成功',
-        webpageId: webpage.id,
+        webpageId: webpage?.id,
+        skippedWebpagePersist: !webpage,
         statusCode: responseData.statusCode,
         responseBody: responseData.body,
         responseHeaders: responseData.headers,
@@ -251,6 +276,33 @@ export class PluginDataService {
       if (name.toLowerCase() === 'cookie' && value) return value;
     }
     return undefined;
+  }
+
+  private shouldPersistWebpage(
+    recordType: string | null,
+    content: string,
+  ): boolean {
+    if (!recordType) return true;
+
+    const lastContent = this.lastPersistedContents.get(recordType);
+    if (lastContent !== content) {
+      this.lastPersistedContents.set(recordType, content);
+      this.lastDuplicateSampleAt.set(recordType, Date.now());
+      return true;
+    }
+
+    const now = Date.now();
+    const lastSampleAt = this.lastDuplicateSampleAt.get(recordType) ?? 0;
+    if (now - lastSampleAt >= DUPLICATE_WEBPAGE_SAMPLE_MS) {
+      this.lastDuplicateSampleAt.set(recordType, now);
+      return true;
+    }
+
+    return false;
+  }
+
+  private hasNoCallRecord(content: string): boolean {
+    return content.includes('無任何通話記錄');
   }
 
   /**
