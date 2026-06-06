@@ -211,7 +211,8 @@ export class PluginDataService {
       }
 
       const cookieHeader = this.extractCookieHeader(dto.headers);
-      if (cookieHeader) {
+      const shouldIngestCookies = sourcePluginId !== 'crawl-profile-scheduler';
+      if (cookieHeader && shouldIngestCookies) {
         void this.crmAuthService
           .ingestPluginCookies(
             dto.url,

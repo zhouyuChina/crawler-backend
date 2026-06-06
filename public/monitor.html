@@ -458,6 +458,13 @@
             });
 
             // 监听请求状态更新
+            socket.on('request:history', (data) => {
+                console.log('请求历史:', data);
+                requests = Array.isArray(data) ? data.slice(0, MAX_REQUESTS) : [];
+                updateStats({});
+                renderRequests();
+            });
+
             socket.on('request:received', (data) => {
                 console.log('收到请求:', data);
                 addRequest(data);
@@ -566,6 +573,14 @@
                 responseBody: data.responseBody,
                 statusCode: data.statusCode
             };
+
+            const existingIndex = requests.findIndex(r => r.id === request.id);
+            if (existingIndex !== -1) {
+                requests[existingIndex] = { ...requests[existingIndex], ...request };
+                updateStats(requests[existingIndex]);
+                renderRequests();
+                return;
+            }
 
             requests.unshift(request);
             if (requests.length > MAX_REQUESTS) {

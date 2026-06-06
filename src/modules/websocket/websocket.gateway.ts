@@ -25,9 +25,24 @@ export class WebsocketGateway
   server: Server;
 
   private logger = new Logger('WebsocketGateway');
+  private readonly requestHistory: Array<{
+    id: string;
+    url: string;
+    method?: string;
+    timestamp?: string;
+    status: 'processing' | 'success' | 'error';
+    message?: string;
+    error?: string;
+    skipped?: boolean;
+    webpageId?: string;
+    responseBody?: string;
+    statusCode?: number;
+  }> = [];
+  private readonly maxRequestHistory = 100;
 
   handleConnection(client: Socket) {
     this.logger.log(`Client connected: ${client.id}`);
+    client.emit('request:history', this.requestHistory);
   }
 
   handleDisconnect(client: Socket) {
@@ -72,6 +87,7 @@ export class WebsocketGateway
     timestamp: string;
     status: 'processing';
   }) {
+    this.upsertRequestHistory(data);
     this.server.emit('request:received', data);
     this.logger.log(`广播请求接收: ${data.method} ${data.url}`);
   }
@@ -89,8 +105,37 @@ export class WebsocketGateway
     responseBody?: string;
     statusCode?: number;
   }) {
+    this.upsertRequestHistory(data);
     this.server.emit('request:processed', data);
     this.logger.log(`广播请求处理完成: ${data.status} - ${data.url}`);
+  }
+
+  private upsertRequestHistory(event: {
+    id: string;
+    url: string;
+    method?: string;
+    timestamp?: string;
+    status: 'processing' | 'success' | 'error';
+    message?: string;
+    error?: string;
+    skipped?: boolean;
+    webpageId?: string;
+    responseBody?: string;
+    statusCode?: number;
+  }) {
+    const index = this.requestHistory.findIndex((item) => item.id === event.id);
+    if (index >= 0) {
+      this.requestHistory[index] = {
+        ...this.requestHistory[index],
+        ...event,
+      };
+    } else {
+      this.requestHistory.unshift(event);
+    }
+
+    if (this.requestHistory.length > this.maxRequestHistory) {
+      this.requestHistory.length = this.maxRequestHistory;
+    }
   }
 
   // 广播通话记录创建事件

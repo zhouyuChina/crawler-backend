@@ -125,12 +125,15 @@ export class CrmAuthService implements OnModuleInit {
     return result;
   }
 
-  /** 使插件提供的 Cookie 进入缓存（作为回退） */
-  setPluginCookies(profileId: string, cookies: string): void {
+  /** 使插件提供的 Cookie 进入缓存（作为回退），返回 Cookie 是否发生变化 */
+  setPluginCookies(profileId: string, cookies: string): boolean {
+    const cached = cookieCache.get(profileId);
+    const changed = cached?.cookies !== cookies;
     cookieCache.set(profileId, {
       cookies,
       expiresAt: Date.now() + COOKIE_TTL_MS,
     });
+    return changed;
   }
 
   /**
@@ -171,13 +174,17 @@ export class CrmAuthService implements OnModuleInit {
     let matched = 0;
 
     for (const profile of matchedProfiles) {
-      this.setPluginCookies(profile.id, cookies);
-      await this.markAuthOk(profile);
-      // 清掉该配置的调度状态，让所有任务（包括表格）在下一次 tick 立即重跑
-      this.onCookiesSynced?.(profile.id);
+      const cookieChanged = this.setPluginCookies(profile.id, cookies);
+      const restored = await this.markAuthOk(profile);
+      // 只有真正恢复登录或 Cookie 变化时才重置调度状态，避免每个普通请求都打乱间隔
+      if (restored || cookieChanged) {
+        this.onCookiesSynced?.(profile.id);
+      }
       matched++;
       this.logger.log(
-        `已从插件同步 Cookie → ${profile.name} (${profile.baseUrl})，调度状态已重置`,
+        `已从插件同步 Cookie → ${profile.name} (${profile.baseUrl})${
+          restored || cookieChanged ? '，调度状态已重置' : ''
+        }`,
       );
     }
 
@@ -325,7 +332,7 @@ export class CrmAuthService implements OnModuleInit {
       .join('; ');
   }
 
-  private async markAuthOk(profile: CrawlProfile): Promise<void> {
+  private async markAuthOk(profile: CrawlProfile): Promise<boolean> {
     const current = await this.profileRepo.findOne({
       where: { id: profile.id },
       select: ['authStatus'],
@@ -344,6 +351,7 @@ export class CrmAuthService implements OnModuleInit {
       void this.telegramNotify.notifyHumanCheckResolved(profile);
       this.onAuthStatusChanged?.(profile.id);
     }
+    return wasNotOk;
   }
 
   private async markHumanCheckRequired(
