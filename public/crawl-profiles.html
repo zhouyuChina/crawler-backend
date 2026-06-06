@@ -355,6 +355,7 @@
 
 <script>
 const API = '/api/crawl-profiles';
+const ADMIN_TOKEN_KEY = 'crawl_admin_token';
 
 // ──── 工具 ────
 
@@ -366,9 +367,14 @@ function showMsg(el, text, type = 'error') {
 }
 
 async function apiFetch(path, opts = {}) {
+  const token = localStorage.getItem(ADMIN_TOKEN_KEY);
   const res = await fetch(API + path, {
     credentials: 'include',
-    headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(opts.headers || {}),
+    },
     ...opts,
   });
   if (res.status === 204) return null;
@@ -409,6 +415,7 @@ async function doLogin() {
       body: JSON.stringify({ username: u, password: p }),
     });
     if (data.success) {
+      if (data.token) localStorage.setItem(ADMIN_TOKEN_KEY, data.token);
       document.getElementById('loginPanel').style.display = 'none';
       document.getElementById('mainPanel').style.display = 'block';
       refreshList();
@@ -426,6 +433,7 @@ document.getElementById('loginPass').addEventListener('keydown', e => {
 
 async function doLogout() {
   await apiFetch('/logout', { method: 'POST' }).catch(() => {});
+  localStorage.removeItem(ADMIN_TOKEN_KEY);
   location.reload();
 }
 

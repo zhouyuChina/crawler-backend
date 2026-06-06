@@ -37,6 +37,14 @@ function parseCookieToken(req: Request | undefined): string | undefined {
   return undefined;
 }
 
+function parseRequestToken(req: Request | undefined): string | undefined {
+  const cookieToken = parseCookieToken(req);
+  if (cookieToken) return cookieToken;
+  const auth = req?.headers?.authorization;
+  if (auth?.startsWith('Bearer ')) return auth.slice(7);
+  return undefined;
+}
+
 @Controller('crawl-profiles')
 export class CrawlProfileController {
   constructor(private readonly service: CrawlProfileService) {}
@@ -73,9 +81,10 @@ export class CrawlProfileController {
     res.cookie('crawl_admin_token', token, {
       httpOnly: true,
       sameSite: 'lax',
+      path: '/',
       maxAge: 8 * 60 * 60 * 1000,
     });
-    return { success: true, message: '登录成功' };
+    return { success: true, message: '登录成功', token };
   }
 
   @Post('logout')
@@ -83,15 +92,15 @@ export class CrawlProfileController {
   adminLogout(
     @Res({ passthrough: true }) res: Response,
   ) {
-    const token = parseCookieToken((res as any).req);
+    const token = parseRequestToken((res as any).req);
     if (token) destroyAdminSession(token);
-    res.clearCookie('crawl_admin_token');
+    res.clearCookie('crawl_admin_token', { path: '/' });
     return { success: true };
   }
 
   @Get('session')
   checkSession(@Res({ passthrough: true }) res: Response) {
-    const token = parseCookieToken((res as any).req);
+    const token = parseRequestToken((res as any).req);
     return { loggedIn: verifyAdminToken(token) };
   }
 
