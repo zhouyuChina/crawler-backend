@@ -617,7 +617,9 @@ async function runOnce(id) {
   gMsg.style.display = 'none';
   try {
     const data = await apiFetch(`/${id}/run-once`, { method: 'POST' });
-    showMsg(gMsg, data.message, 'info');
+    const level = data.accepted ? 'success' : 'error';
+    const detail = data.tasks?.length ? `（${data.tasks.join(', ')}）` : '';
+    showMsg(gMsg, `${data.message}${detail}`, level);
   } catch(e) {
     showMsg(gMsg, `触发失败：${e.message}`);
   }

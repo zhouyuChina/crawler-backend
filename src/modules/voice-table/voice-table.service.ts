@@ -33,8 +33,17 @@ const PAGE_DELAY_MS = 200;
 const MAX_RETRIES = 2;
 const REQUEST_TIMEOUT_MS = 30000;
 const MIN_DETAIL_PAGES_PER_RUN = 10;
+const RESUME_OVERLAP_PAGES = 2;
+const PROGRESS_LOG_INTERVAL_PAGES = 100;
 
 type Headers = Record<string, string>;
+
+interface PageRange {
+  start: number;
+  end: number;
+  label: string;
+  updateCheckpoint: boolean;
+}
 
 export interface CrawlStartResult {
   success: boolean;
@@ -129,18 +138,21 @@ export class VoiceTableService {
       crawlState.lastCompletedPage > 0;
 
     let pagesToFetch: number;
-    let resumeFromPage: number;
+    let pageRanges: PageRange[];
 
     if (isIncomplete) {
-      // 上次中断：从上次完成页的下一页续抓，以最新 totalPages 为终点
-      resumeFromPage = crawlState.lastCompletedPage + 1;
+      // 上次中断：先补扫新增页对应的最新区，再从断点前回退少量页续抓。
       pagesToFetch = Math.max(crawlState.totalPages, newTotalPages);
+      pageRanges = this.buildResumeRanges({
+        lastCompletedPage: crawlState.lastCompletedPage,
+        previousTotalPages: crawlState.totalPages,
+        pagesToFetch,
+      });
       this.logger.log(
-        `断点续抓 ${key}: 从第 ${resumeFromPage} 页开始, 目标共 ${pagesToFetch} 页`,
+        `断点续抓 ${key}: ${this.formatPageRanges(pageRanges)}, 目标共 ${pagesToFetch} 页`,
       );
     } else {
       // 正常增量抓取
-      resumeFromPage = 2;
       const lastTotalPages = await this.getLastTotalPages(strategy.module, mid);
       if (lastTotalPages == null || newTotalPages < lastTotalPages) {
         pagesToFetch = newTotalPages;
@@ -151,6 +163,17 @@ export class VoiceTableService {
         );
       }
       pagesToFetch = Math.min(pagesToFetch, newTotalPages);
+      pageRanges =
+        pagesToFetch >= 2
+          ? [
+              {
+                start: 2,
+                end: pagesToFetch,
+                label: '增量',
+                updateCheckpoint: true,
+              },
+            ]
+          : [];
     }
 
     const detailBusy = this.activeMap.get(key) === true;
@@ -206,7 +229,8 @@ export class VoiceTableService {
 
     // 更新抓取状态：标记 running，第 1 页已完成
     await this.upsertCrawlState(strategy.module, mid, {
-      totalPages: pagesToFetch,
+      // 断点续抓完成前保留旧 totalPages，避免补扫最新区中途重启后丢失 delta。
+      totalPages: isIncomplete ? crawlState.totalPages : newTotalPages,
       lastCompletedPage: isIncomplete
         ? crawlState.lastCompletedPage
         : Math.min(1, pagesToFetch),
@@ -246,8 +270,8 @@ export class VoiceTableService {
       };
     }
 
-    // 第 resumeFromPage..pagesToFetch 页异步循环
-    if (resumeFromPage <= pagesToFetch) {
+    // 后续页异步循环
+    if (pageRanges.length > 0) {
       this.throttleMap.set(key, now);
       this.activeMap.set(key, true);
       void this.runRemainingPages({
@@ -256,7 +280,11 @@ export class VoiceTableService {
         baseUrl: input.url,
         headers,
         pagesToFetch,
-        resumeFromPage,
+        discoveredTotalPages: newTotalPages,
+        pageRanges,
+        initialLastCompletedPage: isIncomplete
+          ? crawlState.lastCompletedPage
+          : Math.min(1, pagesToFetch),
         taskId,
         key,
       })
@@ -269,6 +297,7 @@ export class VoiceTableService {
     } else {
       // 没有后续页需要抓（resumeFromPage > pagesToFetch 说明已全部完成）
       await this.upsertCrawlState(strategy.module, mid, {
+        totalPages: newTotalPages,
         status: 'completed',
         lastCompletedPage: pagesToFetch,
       });
@@ -292,8 +321,9 @@ export class VoiceTableService {
     baseUrl: string;
     headers: Headers;
     pagesToFetch: number;
-    /** 从哪页开始（断点续抓时 > 2） */
-    resumeFromPage: number;
+    discoveredTotalPages: number;
+    pageRanges: PageRange[];
+    initialLastCompletedPage: number;
     taskId: string;
     key: string;
   }): Promise<void> {
@@ -303,36 +333,68 @@ export class VoiceTableService {
       baseUrl,
       headers,
       pagesToFetch,
-      resumeFromPage,
+      discoveredTotalPages,
+      pageRanges,
+      initialLastCompletedPage,
       taskId,
       key,
     } = args;
     const failedPages: Array<{ page: number; error: string }> = [];
     let authAborted = false;
+    let highestCompletedPage = initialLastCompletedPage;
 
-    for (let page = resumeFromPage; page <= pagesToFetch; page++) {
-      try {
-        await this.crawlPage({
-          strategy,
-          mid,
-          baseUrl,
-          headers,
-          page,
-          pagesToFetch,
-          taskId,
-        });
-        // 每页完成后持久化进度
-        await this.upsertCrawlState(strategy.module, mid, {
-          lastCompletedPage: page,
-          status: page < pagesToFetch ? 'running' : 'completed',
-        });
-      } catch (err: any) {
-        const message = err.message || String(err);
+    for (const range of pageRanges) {
+      for (let page = range.start; page <= range.end; page++) {
+        try {
+          const insertedCount = await this.crawlPage({
+            strategy,
+            mid,
+            baseUrl,
+            headers,
+            page,
+            pagesToFetch,
+            taskId,
+          });
+          if (range.updateCheckpoint) {
+            highestCompletedPage = Math.max(highestCompletedPage, page);
+            await this.upsertCrawlState(strategy.module, mid, {
+              lastCompletedPage: highestCompletedPage,
+              status:
+                highestCompletedPage < pagesToFetch ? 'running' : 'completed',
+            });
+          }
+          if (this.shouldLogProgress(page, range.end, insertedCount)) {
+            this.logger.log(
+              `明细进度 ${key}: ${range.label} page=${page}/${pagesToFetch} inserted=${insertedCount}`,
+            );
+          }
+        } catch (err: any) {
+          const message = err.message || String(err);
 
-        // 401/403 = Cookie 已失效，立刻中止，不继续也不补抓
-        if (this.isAuthError(message)) {
+          // 401/403 = Cookie 已失效，立刻中止，不继续也不补抓
+          if (this.isAuthError(message)) {
+            this.logger.warn(
+              `Cookie 失效（${message}），中止后续抓取 ${key}，等待重新登录`,
+            );
+            this.ws.broadcastVoiceTableProgress({
+              module: strategy.module,
+              mid,
+              taskId,
+              page,
+              pagesToFetch,
+              status: 'failed',
+              error: `Cookie 失效，已中止: ${message}`,
+            });
+            await this.upsertCrawlState(strategy.module, mid, {
+              status: 'failed',
+            });
+            authAborted = true;
+            break;
+          }
+
+          failedPages.push({ page, error: message });
           this.logger.warn(
-            `Cookie 失效（${message}），中止后续抓取 ${key}，等待重新登录`,
+            `抓取 page=${page} 失败, 稍后重试 ${key}: ${message}`,
           );
           this.ws.broadcastVoiceTableProgress({
             module: strategy.module,
@@ -341,29 +403,15 @@ export class VoiceTableService {
             page,
             pagesToFetch,
             status: 'failed',
-            error: `Cookie 失效，已中止: ${message}`,
+            error: `${message}; queued for retry`,
           });
-          await this.upsertCrawlState(strategy.module, mid, { status: 'failed' });
-          authAborted = true;
-          break;
         }
 
-        failedPages.push({ page, error: message });
-        this.logger.warn(`抓取 page=${page} 失败, 稍后重试 ${key}: ${message}`);
-        this.ws.broadcastVoiceTableProgress({
-          module: strategy.module,
-          mid,
-          taskId,
-          page,
-          pagesToFetch,
-          status: 'failed',
-          error: `${message}; queued for retry`,
-        });
+        if (page < range.end) {
+          await sleep(PAGE_DELAY_MS);
+        }
       }
-
-      if (page < pagesToFetch) {
-        await sleep(PAGE_DELAY_MS);
-      }
+      if (authAborted) break;
     }
 
     if (authAborted) return;
@@ -380,14 +428,17 @@ export class VoiceTableService {
           pagesToFetch,
           taskId,
         });
+        highestCompletedPage = Math.max(highestCompletedPage, failed.page);
         await this.upsertCrawlState(strategy.module, mid, {
-          lastCompletedPage: failed.page,
+          lastCompletedPage: highestCompletedPage,
         });
       } catch (err: any) {
         const message = err.message || String(err);
         if (this.isAuthError(message)) {
           this.logger.warn(`补抓时 Cookie 失效，中止 ${key}`);
-          await this.upsertCrawlState(strategy.module, mid, { status: 'failed' });
+          await this.upsertCrawlState(strategy.module, mid, {
+            status: 'failed',
+          });
           return;
         }
         this.logger.error(`补抓 page=${failed.page} 失败 ${key}: ${message}`);
@@ -404,7 +455,10 @@ export class VoiceTableService {
     }
 
     // 补抓完成后标记整体状态
-    await this.upsertCrawlState(strategy.module, mid, { status: 'completed' });
+    await this.upsertCrawlState(strategy.module, mid, {
+      totalPages: discoveredTotalPages,
+      status: 'completed',
+    });
   }
 
   private async crawlPage(args: {
@@ -415,8 +469,9 @@ export class VoiceTableService {
     page: number;
     pagesToFetch: number;
     taskId: string;
-  }): Promise<void> {
-    const { strategy, mid, baseUrl, headers, page, pagesToFetch, taskId } = args;
+  }): Promise<number> {
+    const { strategy, mid, baseUrl, headers, page, pagesToFetch, taskId } =
+      args;
     const pageUrl = ensurePageIdParam(baseUrl, page);
     const html = await this.fetchHtmlWithRetry(pageUrl, headers);
     const parsed = strategy.parse(html);
@@ -446,6 +501,92 @@ export class VoiceTableService {
       pagesToFetch,
       status: page === pagesToFetch ? 'completed' : 'running',
     });
+    return inserted.length;
+  }
+
+  private buildResumeRanges(args: {
+    lastCompletedPage: number;
+    previousTotalPages: number;
+    pagesToFetch: number;
+  }): PageRange[] {
+    const { lastCompletedPage, previousTotalPages, pagesToFetch } = args;
+    const deltaPages = Math.max(0, pagesToFetch - previousTotalPages);
+    const ranges: PageRange[] = [];
+
+    if (deltaPages > 0) {
+      const frontEnd = Math.min(
+        pagesToFetch,
+        deltaPages + RESUME_OVERLAP_PAGES,
+      );
+      if (frontEnd >= 2) {
+        ranges.push({
+          start: 2,
+          end: frontEnd,
+          label: '补扫最新区',
+          updateCheckpoint: false,
+        });
+      }
+    }
+
+    const resumeStart = Math.max(
+      2,
+      lastCompletedPage - RESUME_OVERLAP_PAGES + 1,
+    );
+    if (resumeStart <= pagesToFetch) {
+      ranges.push({
+        start: resumeStart,
+        end: pagesToFetch,
+        label: '断点续抓',
+        updateCheckpoint: true,
+      });
+    }
+
+    return this.mergePageRanges(ranges);
+  }
+
+  private mergePageRanges(ranges: PageRange[]): PageRange[] {
+    const sorted = [...ranges].sort((a, b) => a.start - b.start);
+    const merged: PageRange[] = [];
+
+    for (const range of sorted) {
+      const last = merged[merged.length - 1];
+      if (!last || range.start > last.end + 1) {
+        merged.push({ ...range });
+        continue;
+      }
+
+      last.end = Math.max(last.end, range.end);
+      last.updateCheckpoint = last.updateCheckpoint || range.updateCheckpoint;
+      last.label =
+        last.label === range.label
+          ? last.label
+          : `${last.label}+${range.label}`;
+    }
+
+    return merged;
+  }
+
+  private formatPageRanges(ranges: PageRange[]): string {
+    if (ranges.length === 0) return '无后续页';
+    return ranges
+      .map((r) => {
+        const displayStart =
+          r.start === 2 && r.label.includes('补扫最新区') ? 1 : r.start;
+        return `${r.label} ${displayStart}-${r.end}`;
+      })
+      .join(', ');
+  }
+
+  private shouldLogProgress(
+    page: number,
+    rangeEnd: number,
+    insertedCount: number,
+  ): boolean {
+    return (
+      insertedCount > 0 ||
+      page === rangeEnd ||
+      page % PROGRESS_LOG_INTERVAL_PAGES === 0
+    );
   }
 
   private async getLastTotalPages(
@@ -481,7 +622,6 @@ export class VoiceTableService {
         e.src = r.src;
         e.dst = r.dst;
         e.statusType = r.statusType;
-        e.result = r.result;
         e.reason = r.reason;
         e.task = r.task;
         e.callDate = r.callDate;
@@ -743,7 +883,9 @@ export class VoiceTableService {
   private async upsertCrawlState(
     module: string,
     mid: number,
-    update: Partial<Pick<VoiceCrawlState, 'totalPages' | 'lastCompletedPage' | 'status'>>,
+    update: Partial<
+      Pick<VoiceCrawlState, 'totalPages' | 'lastCompletedPage' | 'status'>
+    >,
   ): Promise<void> {
     const existing = await this.crawlStateRepo.findOne({
       where: { module, mid },

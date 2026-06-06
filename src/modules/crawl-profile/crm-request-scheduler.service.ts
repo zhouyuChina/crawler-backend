@@ -16,7 +16,7 @@ interface TaskState {
 }
 
 /** 根据勾选内容推导出需要运行的任务列表（已去重） */
-function buildTaskKeys(contents: CrawlContent[]): TaskKey[] {
+export function buildTaskKeys(contents: CrawlContent[]): TaskKey[] {
   const keys = new Set<TaskKey>();
 
   if (contents.length === 0) return [];

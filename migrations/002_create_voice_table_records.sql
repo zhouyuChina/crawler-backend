@@ -10,14 +10,18 @@ CREATE TABLE IF NOT EXISTS voice_ivr_records (
     src VARCHAR(64),
     dst VARCHAR(64),
     "statusType" VARCHAR(32),
-    result VARCHAR(32),
     reason VARCHAR(255),
     task VARCHAR(255),
     "callDate" TIMESTAMP,
     "sourceUrl" TEXT,
-    "createdAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_voice_ivr_record UNIQUE (mid, "recordId")
+    "createdAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_voice_ivr_record_with_call_date
+    ON voice_ivr_records (mid, "recordId", "callDate")
+    WHERE "callDate" IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_voice_ivr_record_without_call_date
+    ON voice_ivr_records (mid, "recordId")
+    WHERE "callDate" IS NULL;
 CREATE INDEX IF NOT EXISTS idx_voice_ivr_record_mid_created
     ON voice_ivr_records (mid, "createdAt" DESC);
 

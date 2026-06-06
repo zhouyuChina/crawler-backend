@@ -38,13 +38,14 @@ describe('voiceIvrStrategy', () => {
       src: '186000',
       dst: '0433274378',
       statusType: '通話狀態',
-      result: '語音通話',
+      reason: '語音通話',
+      task: null,
     });
     expect(result.rows[0].callDate?.toISOString()).toContain('2026-05-14');
     expect(result.rows[1]).toMatchObject({
       recordId: '96027',
       statusType: '振鈴狀態',
-      result: '無人接聽',
+      reason: '無人接聽',
     });
   });
 
@@ -60,5 +61,26 @@ describe('voiceIvrStrategy', () => {
       5,
     );
     expect(url).toBe('http://x/?mid=24&pageID=5');
+  });
+
+  it('parses 8-column row: 狀態/終止原因/任務/呼叫時間', () => {
+    const html = `<html><body><div id="listDiv"><table><tr>
+      <td class="first-cell"><input type="checkbox" name="checkboxes[]" value="217082">&nbsp;1</td>
+      <td>732100</td><td>0452585340</td>
+      <td align="center">通話狀態</td><td align="center"><font color="green">語音通話</font></td>
+      <td align="center"></td>
+      <td align="center">2026-06-06 13:59:48</td>
+      <td align="center"><a href="javascript:delete_voicecallee('217082')">刪除</a></td>
+    </tr></table></div></body></html>`;
+    const result = voiceIvrStrategy.parse(html);
+    expect(result.rows[0]).toMatchObject({
+      recordId: '217082',
+      src: '732100',
+      dst: '0452585340',
+      statusType: '通話狀態',
+      reason: '語音通話',
+      task: null,
+    });
+    expect(result.rows[0].callDate?.toISOString()).toContain('2026-06-06');
   });
 });

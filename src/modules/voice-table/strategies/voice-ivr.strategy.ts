@@ -52,19 +52,17 @@ function extractIvrRows(html: string): ParsedRowVoiceIvr[] {
     if (!recordId) return;
 
     const $tds = $tr.find('> td');
-    // 受 HTML 中嵌套 td 的影响,cheerio 修正后实际单元格为 9 个:
-    // 0:checkbox 1:src 2:dst 3:statusType 4:result 5:reason 6:task 7:callDate 8:操作
     const td = (i: number) => cleanText($tds.eq(i).text());
 
+    // 0:checkbox 1:src 2:dst 3:statusType 4:reason 5:task 6:callDate 7:操作
     rows.push({
       recordId,
       src: td(1) || null,
       dst: td(2) || null,
       statusType: td(3) || null,
-      result: td(4) || null,
-      reason: td(5) || null,
-      task: td(6) || null,
-      callDate: parseDateTime(td(7)),
+      reason: td(4) || null,
+      task: td(5) || null,
+      callDate: parseDateTime(td(6)),
     });
   });
 

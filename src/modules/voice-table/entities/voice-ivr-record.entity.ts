@@ -4,13 +4,19 @@ import {
   Column,
   CreateDateColumn,
   Index,
-  Unique,
   BeforeInsert,
 } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 
 @Entity('voice_ivr_records')
-@Unique('uq_voice_ivr_record', ['mid', 'recordId'])
+@Index('uq_voice_ivr_record_with_call_date', ['mid', 'recordId', 'callDate'], {
+  unique: true,
+  where: '"callDate" IS NOT NULL',
+})
+@Index('uq_voice_ivr_record_without_call_date', ['mid', 'recordId'], {
+  unique: true,
+  where: '"callDate" IS NULL',
+})
 @Index('idx_voice_ivr_record_mid_created', ['mid', 'createdAt'])
 export class VoiceIvrRecord {
   @PrimaryColumn('uuid')
@@ -37,9 +43,6 @@ export class VoiceIvrRecord {
 
   @Column({ type: 'varchar', length: 32, nullable: true })
   statusType: string | null;
-
-  @Column({ type: 'varchar', length: 32, nullable: true })
-  result: string | null;
 
   @Column({ type: 'varchar', length: 255, nullable: true })
   reason: string | null;

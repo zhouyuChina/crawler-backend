@@ -151,6 +151,7 @@ export class CrawlProfileController {
 
   @Post(':id/run-once')
   @UseGuards(CrawlAdminGuard)
+  @HttpCode(202)
   runOnce(@Param('id') id: string) {
     return this.service.runOnce(id);
   }

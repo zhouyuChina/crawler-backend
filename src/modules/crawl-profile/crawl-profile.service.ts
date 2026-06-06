@@ -1,12 +1,15 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CrawlProfile } from './crawl-profile.entity';
 import { CreateCrawlProfileDto } from './dto/create-crawl-profile.dto';
 import { UpdateCrawlProfileDto } from './dto/update-crawl-profile.dto';
 import { CrmAuthService } from './crm-auth.service';
-import { CrmRequestSchedulerService } from './crm-request-scheduler.service';
-import { CrmRequestRunnerService, TaskKey } from './crm-request-runner.service';
+import {
+  buildTaskKeys,
+  CrmRequestSchedulerService,
+} from './crm-request-scheduler.service';
+import { CrmRequestRunnerService } from './crm-request-runner.service';
 
 const DEFAULT_MIDS = {
   voiceCallStatus: 9,
@@ -17,6 +20,10 @@ const DEFAULT_MIDS = {
 
 @Injectable()
 export class CrawlProfileService {
+  private readonly logger = new Logger(CrawlProfileService.name);
+  /** 防止同一 profile 重复 run-once 堆叠 */
+  private readonly runOnceInFlight = new Set<string>();
+
   constructor(
     @InjectRepository(CrawlProfile)
     private readonly repo: Repository<CrawlProfile>,
@@ -98,37 +105,65 @@ export class CrawlProfileService {
 
   async runOnce(
     id: string,
-  ): Promise<{ triggered: string[]; skipped: string[]; message: string }> {
+  ): Promise<{
+    accepted: boolean;
+    tasks: string[];
+    message: string;
+  }> {
     const profile = await this.repo.findOne({ where: { id } });
     if (!profile) throw new NotFoundException(`CrawlProfile ${id} not found`);
 
-    const allTasks: TaskKey[] = [
-      'get_peer_status',
-      'get_curcall_in',
-      'get_curcall_out',
-      'cont_controler',
-      'cc_mrcall',
-      'cc_voiceivr',
-      'cc_voiceop',
-    ];
+    if (this.runOnceInFlight.has(id)) {
+      return {
+        accepted: false,
+        tasks: [],
+        message: '该配置正在执行中，请稍候再试',
+      };
+    }
 
+    const taskKeys = buildTaskKeys(profile.contents ?? []);
+    if (taskKeys.length === 0) {
+      return {
+        accepted: false,
+        tasks: [],
+        message: '未勾选任何抓取内容',
+      };
+    }
+
+    this.runOnceInFlight.add(id);
+    void this.runTasksInBackground(profile, taskKeys).finally(() => {
+      this.runOnceInFlight.delete(id);
+    });
+
+    return {
+      accepted: true,
+      tasks: taskKeys,
+      message: `已触发 ${taskKeys.length} 个任务，后台执行中（首次可能需登录 CRM，请查看服务端日志）`,
+    };
+  }
+
+  private async runTasksInBackground(
+    profile: CrawlProfile,
+    taskKeys: ReturnType<typeof buildTaskKeys>,
+  ): Promise<void> {
     const triggered: string[] = [];
     const skipped: string[] = [];
 
-    for (const taskKey of allTasks) {
+    for (const taskKey of taskKeys) {
       try {
         await this.runner.runTask(profile, taskKey);
         triggered.push(taskKey);
-      } catch {
+      } catch (err: any) {
         skipped.push(taskKey);
+        this.logger.warn(
+          `run-once ${profile.name}(${taskKey}) 失败: ${err?.message ?? err}`,
+        );
       }
     }
 
-    return {
-      triggered,
-      skipped,
-      message: `触发 ${triggered.length} 个任务，跳过 ${skipped.length} 个`,
-    };
+    this.logger.log(
+      `run-once 完成 ${profile.name}: 成功 ${triggered.length} [${triggered.join(', ')}], 失败 ${skipped.length}${skipped.length ? ` [${skipped.join(', ')}]` : ''}`,
+    );
   }
 
   /** 脱敏密码 */

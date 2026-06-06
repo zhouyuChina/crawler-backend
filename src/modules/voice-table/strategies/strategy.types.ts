@@ -5,7 +5,6 @@ export interface ParsedRowVoiceIvr {
   src: string | null;
   dst: string | null;
   statusType: string | null;
-  result: string | null;
   reason: string | null;
   task: string | null;
   callDate: Date | null;
