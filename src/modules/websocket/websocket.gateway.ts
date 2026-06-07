@@ -5,6 +5,7 @@ import {
   OnGatewayDisconnect,
   SubscribeMessage,
   MessageBody,
+  ConnectedSocket,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
@@ -50,14 +51,19 @@ export class WebsocketGateway
   }
 
   @SubscribeMessage('subscribe:webpage')
-  handleSubscribeWebpage(client: Socket, @MessageBody() data: any) {
+  handleSubscribeWebpage(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() _data: any,
+  ) {
+    if (!client?.id) return { success: false };
     this.logger.log(`Client ${client.id} subscribed to webpage updates`);
     client.join('webpage-updates');
     return { success: true };
   }
 
   @SubscribeMessage('unsubscribe:webpage')
-  handleUnsubscribeWebpage(client: Socket) {
+  handleUnsubscribeWebpage(@ConnectedSocket() client: Socket) {
+    if (!client?.id) return { success: false };
     this.logger.log(`Client ${client.id} unsubscribed from webpage updates`);
     client.leave('webpage-updates');
     return { success: true };

@@ -56,7 +56,14 @@ async function bootstrap() {
   app.useGlobalInterceptors(new TransformInterceptor());
 
   const port = process.env.PORT || 3000;
-  await app.listen(port);
+  const server = await app.listen(port);
+
+  // Node.js 默认 keepAliveTimeout 为 5s，而 Nginx 默认 keepalive_timeout 为 65s。
+  // 当 Nginx 复用一个 Node.js 已关闭的连接时，会收到 ECONNRESET，返回 502。
+  // 将 Node.js 的超时设为大于 Nginx 的值，可彻底解决"第一次请求 502"问题。
+  server.keepAliveTimeout = 70 * 1000;  // 70s > Nginx 默认 65s
+  server.headersTimeout = 75 * 1000;    // 必须大于 keepAliveTimeout
+
   console.log(`Application is running on: http://localhost:${port}`);
   console.log(`API endpoints: http://localhost:${port}/api`);
   console.log(`WebSocket: ws://localhost:${port}/ws`);
