@@ -5,6 +5,7 @@
 -- 1. cc_voiceivr (語音紀錄) 行表
 CREATE TABLE IF NOT EXISTS voice_ivr_records (
     id UUID PRIMARY KEY,
+    "crmProfileId" VARCHAR(128) NOT NULL DEFAULT 'legacy',
     mid INTEGER NOT NULL,
     "recordId" VARCHAR(64) NOT NULL,
     src VARCHAR(64),
@@ -17,17 +18,18 @@ CREATE TABLE IF NOT EXISTS voice_ivr_records (
     "createdAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_voice_ivr_record_with_call_date
-    ON voice_ivr_records (mid, "recordId", "callDate")
+    ON voice_ivr_records ("crmProfileId", mid, "recordId", "callDate")
     WHERE "callDate" IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_voice_ivr_record_without_call_date
-    ON voice_ivr_records (mid, "recordId")
+    ON voice_ivr_records ("crmProfileId", mid, "recordId")
     WHERE "callDate" IS NULL;
-CREATE INDEX IF NOT EXISTS idx_voice_ivr_record_mid_created
-    ON voice_ivr_records (mid, "createdAt" DESC);
+CREATE INDEX IF NOT EXISTS idx_voice_ivr_record_crm_mid_created
+    ON voice_ivr_records ("crmProfileId", mid, "createdAt" DESC);
 
 -- 2. cc_voiceivr 汇总表
 CREATE TABLE IF NOT EXISTS voice_ivr_summaries (
     id UUID PRIMARY KEY,
+    "crmProfileId" VARCHAR(128) NOT NULL DEFAULT 'legacy',
     mid INTEGER NOT NULL,
     "totalRecords" INTEGER DEFAULT 0,
     "connectFail" INTEGER DEFAULT 0,
@@ -39,12 +41,13 @@ CREATE TABLE IF NOT EXISTS voice_ivr_summaries (
     "capturedAt" TIMESTAMP NOT NULL,
     "createdAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_voice_ivr_summary_mid_captured
-    ON voice_ivr_summaries (mid, "capturedAt" DESC);
+CREATE INDEX IF NOT EXISTS idx_voice_ivr_summary_crm_mid_captured
+    ON voice_ivr_summaries ("crmProfileId", mid, "capturedAt" DESC);
 
 -- 3. cc_voiceop (人工紀錄) 行表
 CREATE TABLE IF NOT EXISTS voice_op_records (
     id UUID PRIMARY KEY,
+    "crmProfileId" VARCHAR(128) NOT NULL DEFAULT 'legacy',
     mid INTEGER NOT NULL,
     "recordKey" VARCHAR(64),
     task VARCHAR(255),
@@ -59,14 +62,15 @@ CREATE TABLE IF NOT EXISTS voice_op_records (
     "createdAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_voice_op_record_with_call_date
-    ON voice_op_records (mid, src, dst, "callDate")
+    ON voice_op_records ("crmProfileId", mid, src, dst, ("callDate"::date))
     WHERE "callDate" IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_voice_op_record_mid_created
-    ON voice_op_records (mid, "createdAt" DESC);
+CREATE INDEX IF NOT EXISTS idx_voice_op_record_crm_mid_created
+    ON voice_op_records ("crmProfileId", mid, "createdAt" DESC);
 
 -- 4. cc_voiceop 汇总表
 CREATE TABLE IF NOT EXISTS voice_op_summaries (
     id UUID PRIMARY KEY,
+    "crmProfileId" VARCHAR(128) NOT NULL DEFAULT 'legacy',
     mid INTEGER NOT NULL,
     "totalRecords" INTEGER DEFAULT 0,
     "initCount" INTEGER DEFAULT 0,
@@ -80,8 +84,8 @@ CREATE TABLE IF NOT EXISTS voice_op_summaries (
     "capturedAt" TIMESTAMP NOT NULL,
     "createdAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_voice_op_summary_mid_captured
-    ON voice_op_summaries (mid, "capturedAt" DESC);
+CREATE INDEX IF NOT EXISTS idx_voice_op_summary_crm_mid_captured
+    ON voice_op_summaries ("crmProfileId", mid, "capturedAt" DESC);
 
 COMMENT ON TABLE voice_ivr_records IS 'cc_voiceivr 語音紀錄行表';
 COMMENT ON TABLE voice_ivr_summaries IS 'cc_voiceivr 抓取快照汇总';

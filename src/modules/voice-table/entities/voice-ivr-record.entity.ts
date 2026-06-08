@@ -9,15 +9,27 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 
 @Entity('voice_ivr_records')
-@Index('uq_voice_ivr_record_with_call_date', ['mid', 'recordId', 'callDate'], {
-  unique: true,
-  where: '"callDate" IS NOT NULL',
-})
-@Index('uq_voice_ivr_record_without_call_date', ['mid', 'recordId'], {
-  unique: true,
-  where: '"callDate" IS NULL',
-})
-@Index('idx_voice_ivr_record_mid_created', ['mid', 'createdAt'])
+@Index(
+  'uq_voice_ivr_record_with_call_date',
+  ['crmProfileId', 'mid', 'recordId', 'callDate'],
+  {
+    unique: true,
+    where: '"callDate" IS NOT NULL',
+  },
+)
+@Index(
+  'uq_voice_ivr_record_without_call_date',
+  ['crmProfileId', 'mid', 'recordId'],
+  {
+    unique: true,
+    where: '"callDate" IS NULL',
+  },
+)
+@Index('idx_voice_ivr_record_crm_mid_created', [
+  'crmProfileId',
+  'mid',
+  'createdAt',
+])
 export class VoiceIvrRecord {
   @PrimaryColumn('uuid')
   id: string;
@@ -31,6 +43,9 @@ export class VoiceIvrRecord {
 
   @Column({ type: 'integer' })
   mid: number;
+
+  @Column({ type: 'varchar', length: 128, default: 'legacy' })
+  crmProfileId: string;
 
   @Column({ type: 'varchar', length: 64 })
   recordId: string;

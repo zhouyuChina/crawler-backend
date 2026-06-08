@@ -9,7 +9,11 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 
 @Entity('voice_ivr_summaries')
-@Index('idx_voice_ivr_summary_mid_captured', ['mid', 'capturedAt'])
+@Index('idx_voice_ivr_summary_crm_mid_captured', [
+  'crmProfileId',
+  'mid',
+  'capturedAt',
+])
 export class VoiceIvrSummary {
   @PrimaryColumn('uuid')
   id: string;
@@ -23,6 +27,9 @@ export class VoiceIvrSummary {
 
   @Column({ type: 'integer' })
   mid: number;
+
+  @Column({ type: 'varchar', length: 128, default: 'legacy' })
+  crmProfileId: string;
 
   @Column({ type: 'integer', default: 0 })
   totalRecords: number;

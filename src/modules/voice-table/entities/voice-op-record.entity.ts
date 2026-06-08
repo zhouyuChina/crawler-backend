@@ -9,11 +9,11 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 
 @Entity('voice_op_records')
-@Index('uq_voice_op_record_with_call_date', ['mid', 'src', 'dst', 'callDate'], {
-  unique: true,
-  where: '"callDate" IS NOT NULL',
-})
-@Index('idx_voice_op_record_mid_created', ['mid', 'createdAt'])
+@Index('idx_voice_op_record_crm_mid_created', [
+  'crmProfileId',
+  'mid',
+  'createdAt',
+])
 export class VoiceOpRecord {
   @PrimaryColumn('uuid')
   id: string;
@@ -27,6 +27,9 @@ export class VoiceOpRecord {
 
   @Column({ type: 'integer' })
   mid: number;
+
+  @Column({ type: 'varchar', length: 128, default: 'legacy' })
+  crmProfileId: string;
 
   @Column({ type: 'varchar', length: 64 })
   recordKey: string;

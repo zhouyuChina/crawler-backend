@@ -105,7 +105,11 @@ export class CrmRequestRunnerService {
 
     try {
       if (def.isTable) {
-        const result = await this.voiceTableService.startCrawl({ url, headers });
+        const result = await this.voiceTableService.startCrawl({
+          profileId: profile.id,
+          url,
+          headers,
+        });
         if (!result.success) {
           throw new Error(result.message || 'table crawl failed');
         }

@@ -14,6 +14,10 @@ export class TableCrawlDto {
 
   @IsOptional()
   @IsString()
+  profileId?: string;
+
+  @IsOptional()
+  @IsString()
   method?: string;
 
   /** 浏览器原始 headers(数组形式或对象形式) */
