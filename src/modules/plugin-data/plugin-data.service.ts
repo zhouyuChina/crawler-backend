@@ -199,7 +199,10 @@ export class PluginDataService {
           ? `代理请求成功，状态码: ${responseData.statusCode}`
           : `代理请求成功，状态码: ${responseData.statusCode}（重复内容未落库）`,
         webpageId: webpage?.id,
-        responseBody: responseData.body,
+        responseBody:
+          sourcePluginId === 'crawl-profile-scheduler'
+            ? responseBodyPreview
+            : responseData.body,
         statusCode: responseData.statusCode,
       });
 
