@@ -12,6 +12,7 @@ import * as https from 'https';
 import * as zlib from 'zlib';
 
 const DUPLICATE_WEBPAGE_SAMPLE_MS = 60 * 1000;
+const RESPONSE_BODY_PREVIEW_LIMIT = 8 * 1024;
 
 @Injectable()
 export class PluginDataService {
@@ -155,6 +156,10 @@ export class PluginDataService {
 
       const recordType = this.identifyRecordType(dto.url);
       const responseContent = content || htmlContent;
+      const responseBodyPreview = this.buildResponseBodyPreview(
+        responseData.body,
+        recordType,
+      );
       const shouldPersistWebpage = this.shouldPersistWebpage(
         recordType,
         responseContent,
@@ -253,7 +258,10 @@ export class PluginDataService {
         webpageId: webpage?.id,
         skippedWebpagePersist: !webpage,
         statusCode: responseData.statusCode,
-        responseBody: responseData.body,
+        responseBody:
+          sourcePluginId === 'crawl-profile-scheduler'
+            ? responseBodyPreview
+            : responseData.body,
         responseHeaders: responseData.headers,
       };
     } catch (error: any) {
@@ -303,6 +311,24 @@ export class PluginDataService {
 
   private hasNoCallRecord(content: string): boolean {
     return content.includes('無任何通話記錄');
+  }
+
+  private buildResponseBodyPreview(
+    body: string,
+    recordType: string | null,
+  ): string | undefined {
+    if (!body) return undefined;
+
+    // 高频轮询请求只需要状态和落库结果，不应通过 WS 携带完整 HTML。
+    if (recordType) {
+      return `[omitted high-frequency response: ${body.length} chars]`;
+    }
+
+    if (body.length <= RESPONSE_BODY_PREVIEW_LIMIT) {
+      return body;
+    }
+
+    return `${body.slice(0, RESPONSE_BODY_PREVIEW_LIMIT)}\n...[truncated ${body.length - RESPONSE_BODY_PREVIEW_LIMIT} chars]`;
   }
 
   /**

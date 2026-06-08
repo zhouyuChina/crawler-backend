@@ -10,6 +10,8 @@ import {
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 
+const REQUEST_BODY_PREVIEW_LIMIT = 8 * 1024;
+
 @WebSocketGateway({
   cors: {
     origin: true, // 允许所有来源（动态返回请求的 origin）
@@ -111,7 +113,8 @@ export class WebsocketGateway
     responseBody?: string;
     statusCode?: number;
   }) {
-    this.upsertRequestHistory(data);
+    const safeData = this.sanitizeRequestEvent(data);
+    this.upsertRequestHistory(safeData);
     this.server.emit('request:processed', data);
     this.logger.log(`广播请求处理完成: ${data.status} - ${data.url}`);
   }
@@ -129,19 +132,31 @@ export class WebsocketGateway
     responseBody?: string;
     statusCode?: number;
   }) {
-    const index = this.requestHistory.findIndex((item) => item.id === event.id);
+    const safeEvent = this.sanitizeRequestEvent(event);
+    const index = this.requestHistory.findIndex(
+      (item) => item.id === safeEvent.id,
+    );
     if (index >= 0) {
       this.requestHistory[index] = {
         ...this.requestHistory[index],
-        ...event,
+        ...safeEvent,
       };
     } else {
-      this.requestHistory.unshift(event);
+      this.requestHistory.unshift(safeEvent);
     }
 
     if (this.requestHistory.length > this.maxRequestHistory) {
       this.requestHistory.length = this.maxRequestHistory;
     }
+  }
+
+  private sanitizeRequestEvent<T extends { responseBody?: string }>(event: T): T {
+    if (!event.responseBody) return event;
+    if (event.responseBody.length <= REQUEST_BODY_PREVIEW_LIMIT) return event;
+    return {
+      ...event,
+      responseBody: `${event.responseBody.slice(0, REQUEST_BODY_PREVIEW_LIMIT)}\n...[truncated ${event.responseBody.length - REQUEST_BODY_PREVIEW_LIMIT} chars]`,
+    };
   }
 
   // 广播通话记录创建事件
