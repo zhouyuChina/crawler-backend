@@ -61,9 +61,6 @@ CREATE TABLE IF NOT EXISTS voice_op_records (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_voice_op_record_with_call_date
     ON voice_op_records (mid, src, dst, "callDate")
     WHERE "callDate" IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_voice_op_record_without_call_date
-    ON voice_op_records (mid, src, dst)
-    WHERE "callDate" IS NULL;
 CREATE INDEX IF NOT EXISTS idx_voice_op_record_mid_created
     ON voice_op_records (mid, "createdAt" DESC);
 

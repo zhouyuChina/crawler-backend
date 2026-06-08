@@ -868,12 +868,32 @@ export class VoiceTableService {
       e.sourceUrl = sourceUrl;
       return e;
     });
+
+    return this.upsertVoiceOpRecords(entities);
+  }
+
+  private async upsertVoiceOpRecords(entities: VoiceOpRecord[]): Promise<any[]> {
     const result = await this.opRecordRepo
       .createQueryBuilder()
       .insert()
       .into(VoiceOpRecord)
       .values(entities)
-      .orIgnore()
+      .orUpdate(
+        [
+          'recordKey',
+          'task',
+          'agent',
+          'reason',
+          'duration',
+          'endDate',
+          'sourceUrl',
+        ],
+        ['mid', 'src', 'dst', 'callDate'],
+        {
+          skipUpdateIfNoValuesChanged: true,
+          indexPredicate: '"callDate" IS NOT NULL',
+        },
+      )
       .returning([
         'id',
         'mid',

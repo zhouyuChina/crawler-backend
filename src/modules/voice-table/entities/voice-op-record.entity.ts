@@ -13,10 +13,6 @@ import { v4 as uuidv4 } from 'uuid';
   unique: true,
   where: '"callDate" IS NOT NULL',
 })
-@Index('uq_voice_op_record_without_call_date', ['mid', 'src', 'dst'], {
-  unique: true,
-  where: '"callDate" IS NULL',
-})
 @Index('idx_voice_op_record_mid_created', ['mid', 'createdAt'])
 export class VoiceOpRecord {
   @PrimaryColumn('uuid')
