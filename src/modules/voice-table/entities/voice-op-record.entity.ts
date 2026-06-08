@@ -4,13 +4,19 @@ import {
   Column,
   CreateDateColumn,
   Index,
-  Unique,
   BeforeInsert,
 } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 
 @Entity('voice_op_records')
-@Unique('uq_voice_op_record', ['mid', 'recordKey'])
+@Index('uq_voice_op_record_with_call_date', ['mid', 'src', 'dst', 'callDate'], {
+  unique: true,
+  where: '"callDate" IS NOT NULL',
+})
+@Index('uq_voice_op_record_without_call_date', ['mid', 'src', 'dst'], {
+  unique: true,
+  where: '"callDate" IS NULL',
+})
 @Index('idx_voice_op_record_mid_created', ['mid', 'createdAt'])
 export class VoiceOpRecord {
   @PrimaryColumn('uuid')

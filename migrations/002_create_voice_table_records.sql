@@ -46,7 +46,7 @@ CREATE INDEX IF NOT EXISTS idx_voice_ivr_summary_mid_captured
 CREATE TABLE IF NOT EXISTS voice_op_records (
     id UUID PRIMARY KEY,
     mid INTEGER NOT NULL,
-    "recordKey" VARCHAR(64) NOT NULL,
+    "recordKey" VARCHAR(64),
     task VARCHAR(255),
     src VARCHAR(64),
     dst VARCHAR(64),
@@ -56,9 +56,14 @@ CREATE TABLE IF NOT EXISTS voice_op_records (
     "callDate" TIMESTAMP,
     "endDate" TIMESTAMP,
     "sourceUrl" TEXT,
-    "createdAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_voice_op_record UNIQUE (mid, "recordKey")
+    "createdAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_voice_op_record_with_call_date
+    ON voice_op_records (mid, src, dst, "callDate")
+    WHERE "callDate" IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_voice_op_record_without_call_date
+    ON voice_op_records (mid, src, dst)
+    WHERE "callDate" IS NULL;
 CREATE INDEX IF NOT EXISTS idx_voice_op_record_mid_created
     ON voice_op_records (mid, "createdAt" DESC);
 
