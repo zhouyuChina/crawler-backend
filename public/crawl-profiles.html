@@ -255,7 +255,7 @@
       <label>管理密码</label>
       <input type="password" id="loginPass" placeholder="密码" autocomplete="current-password">
     </div>
-    <button class="btn btn-primary" style="width:100%" onclick="doLogin()">登 录</button>
+    <button id="loginBtn" class="btn btn-primary" style="width:100%" onclick="doLogin()">登 录</button>
   </div>
 
   <!-- ── 主面板 ── -->
@@ -366,17 +366,35 @@ function showMsg(el, text, type = 'error') {
   if (type !== 'error') setTimeout(() => { el.style.display = 'none'; }, 4000);
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function apiFetch(path, opts = {}) {
+  const { retry = 0, retryDelayMs = 300, ...fetchOpts } = opts;
   const token = localStorage.getItem(ADMIN_TOKEN_KEY);
-  const res = await fetch(API + path, {
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(opts.headers || {}),
-    },
-    ...opts,
-  });
+  let res;
+  try {
+    res = await fetch(API + path, {
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(fetchOpts.headers || {}),
+      },
+      ...fetchOpts,
+    });
+  } catch (err) {
+    if (retry > 0) {
+      await sleep(retryDelayMs);
+      return apiFetch(path, { ...fetchOpts, retry: retry - 1, retryDelayMs });
+    }
+    throw err;
+  }
+  if ((res.status === 502 || res.status === 503 || res.status === 504) && retry > 0) {
+    await sleep(retryDelayMs);
+    return apiFetch(path, { ...fetchOpts, retry: retry - 1, retryDelayMs });
+  }
   if (res.status === 204) return null;
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -408,11 +426,17 @@ async function doLogin() {
   const u = document.getElementById('loginUser').value.trim();
   const p = document.getElementById('loginPass').value;
   const msg = document.getElementById('loginMsg');
+  const btn = document.getElementById('loginBtn');
   if (!u || !p) { showMsg(msg, '请填写账号和密码'); return; }
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = '登录中...';
   try {
     const data = await apiFetch('/login', {
       method: 'POST',
       body: JSON.stringify({ username: u, password: p }),
+      retry: 1,
+      retryDelayMs: 500,
     });
     if (data.success) {
       if (data.token) localStorage.setItem(ADMIN_TOKEN_KEY, data.token);
@@ -424,6 +448,9 @@ async function doLogin() {
     }
   } catch (e) {
     showMsg(msg, e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '登 录';
   }
 }
 

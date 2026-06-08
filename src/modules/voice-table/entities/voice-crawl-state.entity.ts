@@ -47,6 +47,10 @@ export class VoiceCrawlState {
   @Column({ type: 'varchar', length: 16, default: 'completed' })
   status: CrawlStateStatus;
 
+  /** IVR 每日锚点全量完成日期，格式 YYYY-MM-DD */
+  @Column({ type: 'varchar', length: 10, nullable: true })
+  initialCompletedDate: string | null;
+
   @UpdateDateColumn()
   updatedAt: Date;
 }

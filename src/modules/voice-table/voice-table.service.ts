@@ -35,6 +35,7 @@ const REQUEST_TIMEOUT_MS = 30000;
 const MIN_DETAIL_PAGES_PER_RUN = 10;
 const RESUME_OVERLAP_PAGES = 2;
 const PROGRESS_LOG_INTERVAL_PAGES = 100;
+const IVR_TAIL_ANCHOR_PAGES = 2;
 
 type Headers = Record<string, string>;
 
@@ -43,6 +44,15 @@ interface PageRange {
   end: number;
   label: string;
   updateCheckpoint: boolean;
+  stopOnDuplicatePage?: boolean;
+  stopOnAnchorKeys?: Set<string>;
+  initialCompletedDate?: string;
+}
+
+interface CrawlPageOutcome {
+  insertedCount: number;
+  containsAnchor: boolean;
+  allRowsDuplicate: boolean;
 }
 
 export interface CrawlStartResult {
@@ -139,8 +149,58 @@ export class VoiceTableService {
 
     let pagesToFetch: number;
     let pageRanges: PageRange[];
+    const ivrBusinessDate =
+      strategy.module === 'voice_ivr'
+        ? this.getIvrBusinessDate(firstParsed.rows as ParsedRowVoiceIvr[])
+        : null;
+    const needsIvrDailyAnchor =
+      strategy.module === 'voice_ivr' &&
+      ivrBusinessDate != null &&
+      crawlState?.initialCompletedDate !== ivrBusinessDate;
 
-    if (isIncomplete) {
+    if (needsIvrDailyAnchor) {
+      pagesToFetch = newTotalPages;
+      const tailAnchorKeys = await this.fetchIvrTailAnchorKeys({
+        strategy,
+        mid,
+        baseUrl: input.url,
+        headers,
+        totalPages: newTotalPages,
+      });
+      pageRanges =
+        pagesToFetch >= 2
+          ? [
+              {
+                start: 2,
+                end: pagesToFetch,
+                label: '每日初始锚点',
+                updateCheckpoint: true,
+                stopOnAnchorKeys: tailAnchorKeys,
+                initialCompletedDate: ivrBusinessDate,
+              },
+            ]
+          : [];
+      this.logger.log(
+        `IVR 每日初始锚点 ${key}: date=${ivrBusinessDate} anchors=${tailAnchorKeys.size} 目标共 ${pagesToFetch} 页`,
+      );
+    } else if (strategy.module === 'voice_ivr') {
+      pagesToFetch = newTotalPages;
+      pageRanges =
+        pagesToFetch >= 2
+          ? [
+              {
+                start: 2,
+                end: pagesToFetch,
+                label: '增量查重',
+                updateCheckpoint: false,
+                stopOnDuplicatePage: true,
+              },
+            ]
+          : [];
+      this.logger.log(
+        `IVR 增量查重 ${key}: 从首页向后扫到整页重复, 最大 ${pagesToFetch} 页`,
+      );
+    } else if (isIncomplete) {
       // 上次中断：先补扫新增页对应的最新区，再从断点前回退少量页续抓。
       pagesToFetch = Math.max(crawlState.totalPages, newTotalPages);
       pageRanges = this.buildResumeRanges({
@@ -182,8 +242,9 @@ export class VoiceTableService {
       0,
       THROTTLE_MS - (now - lastDetailStart),
     );
-    // 有未完成页时跳过节流，确保能续抓
-    const detailThrottled = !isIncomplete && detailRetryAfterMs > 0;
+    // 有未完成页或每日初始锚点任务时跳过节流，确保能补齐缺口。
+    const hasPendingDetail = isIncomplete || needsIvrDailyAnchor;
+    const detailThrottled = !hasPendingDetail && detailRetryAfterMs > 0;
 
     // 写入第一页行 + WS 推送
     const insertedFirst = await this.persistRows(
@@ -201,6 +262,16 @@ export class VoiceTableService {
         taskId,
         timestamp: new Date().toISOString(),
       });
+    }
+    if (
+      strategy.module === 'voice_ivr' &&
+      !needsIvrDailyAnchor &&
+      firstParsed.rows.length > 0 &&
+      insertedFirst.length === 0
+    ) {
+      pageRanges = [];
+      pagesToFetch = 1;
+      this.logger.log(`IVR 首页整页重复 ${key}: 本轮增量无需继续翻页`);
     }
     this.ws.broadcastVoiceTableProgress({
       module: strategy.module,
@@ -230,10 +301,14 @@ export class VoiceTableService {
     // 更新抓取状态：标记 running，第 1 页已完成
     await this.upsertCrawlState(strategy.module, mid, {
       // 断点续抓完成前保留旧 totalPages，避免补扫最新区中途重启后丢失 delta。
-      totalPages: isIncomplete ? crawlState.totalPages : newTotalPages,
-      lastCompletedPage: isIncomplete
-        ? crawlState.lastCompletedPage
-        : Math.min(1, pagesToFetch),
+      totalPages:
+        isIncomplete && strategy.module !== 'voice_ivr'
+          ? crawlState.totalPages
+          : newTotalPages,
+      lastCompletedPage:
+        isIncomplete && strategy.module !== 'voice_ivr'
+          ? crawlState.lastCompletedPage
+          : Math.min(1, pagesToFetch),
       status: 'running',
     });
 
@@ -300,6 +375,9 @@ export class VoiceTableService {
         totalPages: newTotalPages,
         status: 'completed',
         lastCompletedPage: pagesToFetch,
+        initialCompletedDate: needsIvrDailyAnchor
+          ? ivrBusinessDate
+          : crawlState?.initialCompletedDate,
       });
     }
 
@@ -342,11 +420,14 @@ export class VoiceTableService {
     const failedPages: Array<{ page: number; error: string }> = [];
     let authAborted = false;
     let highestCompletedPage = initialLastCompletedPage;
+    let stoppedByBoundary = false;
+    let completedInitialDate: string | null = null;
+    let unresolvedFailedPages = 0;
 
     for (const range of pageRanges) {
       for (let page = range.start; page <= range.end; page++) {
         try {
-          const insertedCount = await this.crawlPage({
+          const outcome = await this.crawlPage({
             strategy,
             mid,
             baseUrl,
@@ -354,19 +435,34 @@ export class VoiceTableService {
             page,
             pagesToFetch,
             taskId,
+            anchorKeys: range.stopOnAnchorKeys,
           });
           if (range.updateCheckpoint) {
             highestCompletedPage = Math.max(highestCompletedPage, page);
             await this.upsertCrawlState(strategy.module, mid, {
               lastCompletedPage: highestCompletedPage,
-              status:
-                highestCompletedPage < pagesToFetch ? 'running' : 'completed',
+              status: 'running',
             });
           }
-          if (this.shouldLogProgress(page, range.end, insertedCount)) {
+          if (this.shouldLogProgress(page, range.end, outcome.insertedCount)) {
             this.logger.log(
-              `明细进度 ${key}: ${range.label} page=${page}/${pagesToFetch} inserted=${insertedCount}`,
+              `明细进度 ${key}: ${range.label} page=${page}/${pagesToFetch} inserted=${outcome.insertedCount}`,
             );
+          }
+          if (range.stopOnAnchorKeys && outcome.containsAnchor) {
+            stoppedByBoundary = true;
+            completedInitialDate = range.initialCompletedDate ?? null;
+            this.logger.log(
+              `IVR 命中尾页锚点 ${key}: page=${page}/${pagesToFetch}, 每日初始完成`,
+            );
+            break;
+          }
+          if (range.stopOnDuplicatePage && outcome.allRowsDuplicate) {
+            stoppedByBoundary = true;
+            this.logger.log(
+              `IVR 命中整页重复 ${key}: page=${page}/${pagesToFetch}, 增量完成`,
+            );
+            break;
           }
         } catch (err: any) {
           const message = err.message || String(err);
@@ -411,7 +507,10 @@ export class VoiceTableService {
           await sleep(PAGE_DELAY_MS);
         }
       }
-      if (authAborted) break;
+      if (authAborted || stoppedByBoundary) break;
+      if (range.initialCompletedDate) {
+        completedInitialDate = range.initialCompletedDate;
+      }
     }
 
     if (authAborted) return;
@@ -441,6 +540,7 @@ export class VoiceTableService {
           });
           return;
         }
+        unresolvedFailedPages++;
         this.logger.error(`补抓 page=${failed.page} 失败 ${key}: ${message}`);
         this.ws.broadcastVoiceTableProgress({
           module: strategy.module,
@@ -454,9 +554,33 @@ export class VoiceTableService {
       }
     }
 
-    // 补抓完成后标记整体状态
+    if (unresolvedFailedPages > 0) {
+      await this.upsertCrawlState(strategy.module, mid, {
+        totalPages: discoveredTotalPages,
+        lastCompletedPage: highestCompletedPage,
+        status: 'failed',
+      });
+      this.logger.warn(
+        `明细存在失败页 ${key}: failed=${unresolvedFailedPages}, 保持 failed 等待下轮补抓`,
+      );
+      return;
+    }
+
+    // 补抓完成后标记整体状态。completed 表示本轮计划完成，不表示源系统此刻不再新增。
     await this.upsertCrawlState(strategy.module, mid, {
       totalPages: discoveredTotalPages,
+      lastCompletedPage: highestCompletedPage,
+      status: 'completed',
+      ...(completedInitialDate
+        ? { initialCompletedDate: completedInitialDate }
+        : {}),
+    });
+    this.ws.broadcastVoiceTableProgress({
+      module: strategy.module,
+      mid,
+      taskId,
+      page: highestCompletedPage,
+      pagesToFetch,
       status: 'completed',
     });
   }
@@ -469,9 +593,18 @@ export class VoiceTableService {
     page: number;
     pagesToFetch: number;
     taskId: string;
-  }): Promise<number> {
-    const { strategy, mid, baseUrl, headers, page, pagesToFetch, taskId } =
-      args;
+    anchorKeys?: Set<string>;
+  }): Promise<CrawlPageOutcome> {
+    const {
+      strategy,
+      mid,
+      baseUrl,
+      headers,
+      page,
+      pagesToFetch,
+      taskId,
+      anchorKeys,
+    } = args;
     const pageUrl = ensurePageIdParam(baseUrl, page);
     const html = await this.fetchHtmlWithRetry(pageUrl, headers);
     const parsed = strategy.parse(html);
@@ -501,7 +634,74 @@ export class VoiceTableService {
       pagesToFetch,
       status: page === pagesToFetch ? 'completed' : 'running',
     });
-    return inserted.length;
+    return {
+      insertedCount: inserted.length,
+      containsAnchor:
+        anchorKeys != null &&
+        this.rowsContainIvrAnchor(mid, parsed.rows, anchorKeys),
+      allRowsDuplicate: parsed.rows.length > 0 && inserted.length === 0,
+    };
+  }
+
+  private async fetchIvrTailAnchorKeys(args: {
+    strategy: VoiceTableStrategy;
+    mid: number;
+    baseUrl: string;
+    headers: Headers;
+    totalPages: number;
+  }): Promise<Set<string>> {
+    const { strategy, mid, baseUrl, headers, totalPages } = args;
+    const keys = new Set<string>();
+    if (totalPages <= 1) return keys;
+
+    const start = Math.max(2, totalPages - IVR_TAIL_ANCHOR_PAGES + 1);
+    for (let page = start; page <= totalPages; page++) {
+      const pageUrl = ensurePageIdParam(baseUrl, page);
+      const html = await this.fetchHtmlWithRetry(pageUrl, headers);
+      const parsed = strategy.parse(html);
+      for (const row of parsed.rows as ParsedRowVoiceIvr[]) {
+        const key = this.buildIvrAnchorKey(mid, row);
+        if (key) keys.add(key);
+      }
+      this.logger.log(
+        `IVR 尾页锚点 ${strategy.module}:${mid}: page=${page}/${totalPages} anchors=${keys.size}`,
+      );
+    }
+    return keys;
+  }
+
+  private rowsContainIvrAnchor(
+    mid: number,
+    rows: ParsedRowVoiceIvr[] | ParsedRowVoiceOp[],
+    anchorKeys: Set<string>,
+  ): boolean {
+    for (const row of rows as ParsedRowVoiceIvr[]) {
+      const key = this.buildIvrAnchorKey(mid, row);
+      if (key && anchorKeys.has(key)) return true;
+    }
+    return false;
+  }
+
+  private getIvrBusinessDate(rows: ParsedRowVoiceIvr[]): string | null {
+    for (const row of rows) {
+      if (row.callDate) return this.formatDateKey(row.callDate);
+    }
+    return null;
+  }
+
+  private buildIvrAnchorKey(
+    mid: number,
+    row: ParsedRowVoiceIvr,
+  ): string | null {
+    if (!row.recordId || !row.callDate) return null;
+    return `${mid}|${this.formatDateKey(row.callDate)}|${row.recordId}`;
+  }
+
+  private formatDateKey(date: Date): string {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
   }
 
   private buildResumeRanges(args: {
@@ -634,7 +834,19 @@ export class VoiceTableService {
         .into(VoiceIvrRecord)
         .values(entities)
         .orIgnore()
-        .returning('*')
+        .returning([
+          'id',
+          'mid',
+          'recordId',
+          'src',
+          'dst',
+          'statusType',
+          'reason',
+          'task',
+          'callDate',
+          'sourceUrl',
+          'createdAt',
+        ])
         .execute();
       return (result.raw as any[]) ?? [];
     }
@@ -662,7 +874,21 @@ export class VoiceTableService {
       .into(VoiceOpRecord)
       .values(entities)
       .orIgnore()
-      .returning('*')
+      .returning([
+        'id',
+        'mid',
+        'recordKey',
+        'task',
+        'src',
+        'dst',
+        'agent',
+        'reason',
+        'duration',
+        'callDate',
+        'endDate',
+        'sourceUrl',
+        'createdAt',
+      ])
       .execute();
     return (result.raw as any[]) ?? [];
   }
@@ -884,7 +1110,10 @@ export class VoiceTableService {
     module: string,
     mid: number,
     update: Partial<
-      Pick<VoiceCrawlState, 'totalPages' | 'lastCompletedPage' | 'status'>
+      Pick<
+        VoiceCrawlState,
+        'totalPages' | 'lastCompletedPage' | 'status' | 'initialCompletedDate'
+      >
     >,
   ): Promise<void> {
     const existing = await this.crawlStateRepo.findOne({
@@ -900,6 +1129,7 @@ export class VoiceTableService {
       s.totalPages = update.totalPages ?? 1;
       s.lastCompletedPage = update.lastCompletedPage ?? 0;
       s.status = (update.status ?? 'running') as CrawlStateStatus;
+      s.initialCompletedDate = update.initialCompletedDate ?? null;
       await this.crawlStateRepo.save(s);
     }
   }
