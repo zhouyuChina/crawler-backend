@@ -11,7 +11,7 @@ import { v4 as uuidv4 } from 'uuid';
 @Entity('voice_ivr_records')
 @Index(
   'uq_voice_ivr_record_with_call_date',
-  ['crmProfileId', 'mid', 'recordId', 'callDate'],
+  ['crmKey', 'mid', 'recordId', 'callDate'],
   {
     unique: true,
     where: '"callDate" IS NOT NULL',
@@ -19,14 +19,14 @@ import { v4 as uuidv4 } from 'uuid';
 )
 @Index(
   'uq_voice_ivr_record_without_call_date',
-  ['crmProfileId', 'mid', 'recordId'],
+  ['crmKey', 'mid', 'recordId'],
   {
     unique: true,
     where: '"callDate" IS NULL',
   },
 )
 @Index('idx_voice_ivr_record_crm_mid_created', [
-  'crmProfileId',
+  'crmKey',
   'mid',
   'createdAt',
 ])
@@ -45,7 +45,7 @@ export class VoiceIvrRecord {
   mid: number;
 
   @Column({ type: 'varchar', length: 128, default: 'legacy' })
-  crmProfileId: string;
+  crmKey: string;
 
   @Column({ type: 'varchar', length: 64 })
   recordId: string;

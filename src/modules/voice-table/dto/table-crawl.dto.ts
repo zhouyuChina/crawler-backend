@@ -14,7 +14,7 @@ export class TableCrawlDto {
 
   @IsOptional()
   @IsString()
-  profileId?: string;
+  crmKey?: string;
 
   @IsOptional()
   @IsString()

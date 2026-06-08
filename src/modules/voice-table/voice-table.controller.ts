@@ -9,7 +9,7 @@ export class VoiceTableController {
   @Post('table-crawl')
   async tableCrawl(@Body() dto: TableCrawlDto): Promise<CrawlStartResult> {
     const result = await this.service.startCrawl({
-      profileId: dto.profileId,
+      crmKey: dto.crmKey,
       url: dto.url,
       headers: dto.headers,
     });

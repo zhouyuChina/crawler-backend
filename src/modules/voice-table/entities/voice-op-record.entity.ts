@@ -10,7 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 @Entity('voice_op_records')
 @Index('idx_voice_op_record_crm_mid_created', [
-  'crmProfileId',
+  'crmKey',
   'mid',
   'createdAt',
 ])
@@ -29,7 +29,7 @@ export class VoiceOpRecord {
   mid: number;
 
   @Column({ type: 'varchar', length: 128, default: 'legacy' })
-  crmProfileId: string;
+  crmKey: string;
 
   @Column({ type: 'varchar', length: 64 })
   recordKey: string;

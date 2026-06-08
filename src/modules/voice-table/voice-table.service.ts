@@ -92,7 +92,7 @@ export class VoiceTableService {
   ) {}
 
   async startCrawl(input: {
-    profileId?: string;
+    crmKey?: string;
     url: string;
     headers?: Headers | Array<{ name: string; value: string }>;
   }): Promise<CrawlStartResult> {
@@ -105,8 +105,8 @@ export class VoiceTableService {
       return { success: false, message: 'mid query param missing' };
     }
 
-    const crmProfileId = input.profileId ?? this.buildDirectCrmProfileId(input.url);
-    const key = `${crmProfileId}:${strategy.module}:${mid}`;
+    const crmKey = this.normalizeCrmKey(input.crmKey ?? input.url);
+    const key = `${crmKey}:${strategy.module}:${mid}`;
     const now = Date.now();
 
     const headers = this.normalizeHeaders(input.headers);
@@ -142,7 +142,7 @@ export class VoiceTableService {
 
     // 加载持久化的抓取状态，判断是否断点续抓
     const crawlState = await this.crawlStateRepo.findOne({
-      where: { crmProfileId, module: strategy.module, mid },
+      where: { crmKey, module: strategy.module, mid },
     });
     const isIncomplete =
       crawlState &&
@@ -164,7 +164,7 @@ export class VoiceTableService {
       pagesToFetch = newTotalPages;
       const tailAnchorKeys = await this.fetchIvrTailAnchorKeys({
         strategy,
-        crmProfileId,
+        crmKey,
         mid,
         baseUrl: input.url,
         headers,
@@ -217,7 +217,7 @@ export class VoiceTableService {
     } else {
       // 正常增量抓取
       const lastTotalPages = await this.getLastTotalPages(
-        crmProfileId,
+        crmKey,
         strategy.module,
         mid,
       );
@@ -256,7 +256,7 @@ export class VoiceTableService {
     // 写入第一页行 + WS 推送
     const insertedFirst = await this.persistRows(
       strategy.module,
-      crmProfileId,
+      crmKey,
       mid,
       input.url,
       firstParsed.rows,
@@ -296,7 +296,7 @@ export class VoiceTableService {
     const capturedAt = new Date();
     await this.persistSummary(
       strategy,
-      crmProfileId,
+      crmKey,
       mid,
       input.url,
       firstParsed.summary,
@@ -308,7 +308,7 @@ export class VoiceTableService {
     );
 
     // 更新抓取状态：标记 running，第 1 页已完成
-    await this.upsertCrawlState(crmProfileId, strategy.module, mid, {
+    await this.upsertCrawlState(crmKey, strategy.module, mid, {
       // 断点续抓完成前保留旧 totalPages，避免补扫最新区中途重启后丢失 delta。
       totalPages:
         isIncomplete && strategy.module !== 'voice_ivr'
@@ -341,7 +341,7 @@ export class VoiceTableService {
           detailRetryAfterMs / 1000,
         )}s`,
       );
-      await this.upsertCrawlState(crmProfileId, strategy.module, mid, {
+      await this.upsertCrawlState(crmKey, strategy.module, mid, {
         status: 'failed',
       });
       return {
@@ -362,7 +362,7 @@ export class VoiceTableService {
       this.activeMap.set(key, true);
       void this.runRemainingPages({
         strategy,
-        crmProfileId,
+        crmKey,
         mid,
         baseUrl: input.url,
         headers,
@@ -383,7 +383,7 @@ export class VoiceTableService {
         });
     } else {
       // 没有后续页需要抓（resumeFromPage > pagesToFetch 说明已全部完成）
-      await this.upsertCrawlState(crmProfileId, strategy.module, mid, {
+      await this.upsertCrawlState(crmKey, strategy.module, mid, {
         totalPages: newTotalPages,
         status: 'completed',
         lastCompletedPage: pagesToFetch,
@@ -407,7 +407,7 @@ export class VoiceTableService {
 
   private async runRemainingPages(args: {
     strategy: VoiceTableStrategy;
-    crmProfileId: string;
+    crmKey: string;
     mid: number;
     baseUrl: string;
     headers: Headers;
@@ -420,7 +420,7 @@ export class VoiceTableService {
   }): Promise<void> {
     const {
       strategy,
-      crmProfileId,
+      crmKey,
       mid,
       baseUrl,
       headers,
@@ -443,7 +443,7 @@ export class VoiceTableService {
         try {
           const outcome = await this.crawlPage({
             strategy,
-            crmProfileId,
+            crmKey,
             mid,
             baseUrl,
             headers,
@@ -454,7 +454,7 @@ export class VoiceTableService {
           });
           if (range.updateCheckpoint) {
             highestCompletedPage = Math.max(highestCompletedPage, page);
-            await this.upsertCrawlState(crmProfileId, strategy.module, mid, {
+            await this.upsertCrawlState(crmKey, strategy.module, mid, {
               lastCompletedPage: highestCompletedPage,
               status: 'running',
             });
@@ -496,7 +496,7 @@ export class VoiceTableService {
               status: 'failed',
               error: `Cookie 失效，已中止: ${message}`,
             });
-            await this.upsertCrawlState(crmProfileId, strategy.module, mid, {
+            await this.upsertCrawlState(crmKey, strategy.module, mid, {
               status: 'failed',
             });
             authAborted = true;
@@ -535,7 +535,7 @@ export class VoiceTableService {
         this.logger.log(`补抓 page=${failed.page} ${key}`);
         await this.crawlPage({
           strategy,
-          crmProfileId,
+          crmKey,
           mid,
           baseUrl,
           headers,
@@ -544,14 +544,14 @@ export class VoiceTableService {
           taskId,
         });
         highestCompletedPage = Math.max(highestCompletedPage, failed.page);
-        await this.upsertCrawlState(crmProfileId, strategy.module, mid, {
+        await this.upsertCrawlState(crmKey, strategy.module, mid, {
           lastCompletedPage: highestCompletedPage,
         });
       } catch (err: any) {
         const message = err.message || String(err);
         if (this.isAuthError(message)) {
           this.logger.warn(`补抓时 Cookie 失效，中止 ${key}`);
-          await this.upsertCrawlState(crmProfileId, strategy.module, mid, {
+          await this.upsertCrawlState(crmKey, strategy.module, mid, {
             status: 'failed',
           });
           return;
@@ -571,7 +571,7 @@ export class VoiceTableService {
     }
 
     if (unresolvedFailedPages > 0) {
-      await this.upsertCrawlState(crmProfileId, strategy.module, mid, {
+      await this.upsertCrawlState(crmKey, strategy.module, mid, {
         totalPages: discoveredTotalPages,
         lastCompletedPage: highestCompletedPage,
         status: 'failed',
@@ -583,7 +583,7 @@ export class VoiceTableService {
     }
 
     // 补抓完成后标记整体状态。completed 表示本轮计划完成，不表示源系统此刻不再新增。
-    await this.upsertCrawlState(crmProfileId, strategy.module, mid, {
+    await this.upsertCrawlState(crmKey, strategy.module, mid, {
       totalPages: discoveredTotalPages,
       lastCompletedPage: highestCompletedPage,
       status: 'completed',
@@ -603,7 +603,7 @@ export class VoiceTableService {
 
   private async crawlPage(args: {
     strategy: VoiceTableStrategy;
-    crmProfileId: string;
+    crmKey: string;
     mid: number;
     baseUrl: string;
     headers: Headers;
@@ -614,7 +614,7 @@ export class VoiceTableService {
   }): Promise<CrawlPageOutcome> {
     const {
       strategy,
-      crmProfileId,
+      crmKey,
       mid,
       baseUrl,
       headers,
@@ -628,7 +628,7 @@ export class VoiceTableService {
     const parsed = strategy.parse(html);
     const inserted = await this.persistRows(
       strategy.module,
-      crmProfileId,
+      crmKey,
       mid,
       baseUrl,
       parsed.rows,
@@ -657,20 +657,20 @@ export class VoiceTableService {
       insertedCount: inserted.length,
       containsAnchor:
         anchorKeys != null &&
-        this.rowsContainIvrAnchor(crmProfileId, mid, parsed.rows, anchorKeys),
+        this.rowsContainIvrAnchor(crmKey, mid, parsed.rows, anchorKeys),
       allRowsDuplicate: parsed.rows.length > 0 && inserted.length === 0,
     };
   }
 
   private async fetchIvrTailAnchorKeys(args: {
     strategy: VoiceTableStrategy;
-    crmProfileId: string;
+    crmKey: string;
     mid: number;
     baseUrl: string;
     headers: Headers;
     totalPages: number;
   }): Promise<Set<string>> {
-    const { strategy, crmProfileId, mid, baseUrl, headers, totalPages } = args;
+    const { strategy, crmKey, mid, baseUrl, headers, totalPages } = args;
     const keys = new Set<string>();
     if (totalPages <= 1) return keys;
 
@@ -680,7 +680,7 @@ export class VoiceTableService {
       const html = await this.fetchHtmlWithRetry(pageUrl, headers);
       const parsed = strategy.parse(html);
       for (const row of parsed.rows as ParsedRowVoiceIvr[]) {
-        const key = this.buildIvrAnchorKey(crmProfileId, mid, row);
+        const key = this.buildIvrAnchorKey(crmKey, mid, row);
         if (key) keys.add(key);
       }
       this.logger.log(
@@ -691,13 +691,13 @@ export class VoiceTableService {
   }
 
   private rowsContainIvrAnchor(
-    crmProfileId: string,
+    crmKey: string,
     mid: number,
     rows: ParsedRowVoiceIvr[] | ParsedRowVoiceOp[],
     anchorKeys: Set<string>,
   ): boolean {
     for (const row of rows as ParsedRowVoiceIvr[]) {
-      const key = this.buildIvrAnchorKey(crmProfileId, mid, row);
+      const key = this.buildIvrAnchorKey(crmKey, mid, row);
       if (key && anchorKeys.has(key)) return true;
     }
     return false;
@@ -711,12 +711,12 @@ export class VoiceTableService {
   }
 
   private buildIvrAnchorKey(
-    crmProfileId: string,
+    crmKey: string,
     mid: number,
     row: ParsedRowVoiceIvr,
   ): string | null {
     if (!row.recordId || !row.callDate) return null;
-    return `${crmProfileId}|${mid}|${this.formatDateKey(row.callDate)}|${row.recordId}`;
+    return `${crmKey}|${mid}|${this.formatDateKey(row.callDate)}|${row.recordId}`;
   }
 
   private formatDateKey(date: Date): string {
@@ -812,7 +812,7 @@ export class VoiceTableService {
   }
 
   private async getLastTotalPages(
-    crmProfileId: string,
+    crmKey: string,
     module: VoiceModule,
     mid: number,
   ): Promise<number | null> {
@@ -820,7 +820,7 @@ export class VoiceTableService {
       module === 'voice_ivr' ? this.ivrSummaryRepo : this.opSummaryRepo;
     const last = await repo
       .createQueryBuilder('s')
-      .where('s."crmProfileId" = :crmProfileId', { crmProfileId })
+      .where('s."crmKey" = :crmKey', { crmKey })
       .andWhere('s.mid = :mid', { mid })
       .andWhere('(s."totalRecords" > 0 OR s."totalPages" > 1)')
       .orderBy('s."capturedAt"', 'DESC')
@@ -830,7 +830,7 @@ export class VoiceTableService {
 
   private async persistRows(
     module: VoiceModule,
-    crmProfileId: string,
+    crmKey: string,
     mid: number,
     sourceUrl: string,
     rows: ParsedRowVoiceIvr[] | ParsedRowVoiceOp[],
@@ -842,7 +842,7 @@ export class VoiceTableService {
       const entities = ivrRows.map((r) => {
         const e = new VoiceIvrRecord();
         e.id = uuidv4();
-        e.crmProfileId = crmProfileId;
+        e.crmKey = crmKey;
         e.mid = mid;
         e.recordId = r.recordId;
         e.src = r.src;
@@ -862,7 +862,7 @@ export class VoiceTableService {
         .orIgnore()
         .returning([
           'id',
-          'crmProfileId',
+          'crmKey',
           'mid',
           'recordId',
           'src',
@@ -882,7 +882,7 @@ export class VoiceTableService {
     const entities = opRows.map((r) => {
       const e = new VoiceOpRecord();
       e.id = uuidv4();
-      e.crmProfileId = crmProfileId;
+      e.crmKey = crmKey;
       e.mid = mid;
       e.recordKey = r.recordKey;
       e.task = r.task;
@@ -907,7 +907,7 @@ export class VoiceTableService {
       .into(VoiceOpRecord)
       .values(entities)
       .onConflict(
-        `("crmProfileId", mid, src, dst, ("callDate"::date)) WHERE "callDate" IS NOT NULL DO UPDATE SET
+        `("crmKey", mid, src, dst, ("callDate"::date)) WHERE "callDate" IS NOT NULL DO UPDATE SET
           "recordKey" = EXCLUDED."recordKey",
           task = EXCLUDED.task,
           agent = EXCLUDED.agent,
@@ -928,7 +928,7 @@ export class VoiceTableService {
       )
       .returning([
         'id',
-        'crmProfileId',
+        'crmKey',
         'mid',
         'recordKey',
         'task',
@@ -948,7 +948,7 @@ export class VoiceTableService {
 
   private async persistSummary(
     strategy: VoiceTableStrategy,
-    crmProfileId: string,
+    crmKey: string,
     mid: number,
     sourceUrl: string,
     summary: ParsedSummaryVoiceIvr | ParsedSummaryVoiceOp,
@@ -968,7 +968,7 @@ export class VoiceTableService {
     if (strategy.module === 'voice_ivr') {
       const s = summary as ParsedSummaryVoiceIvr;
       const last = await this.ivrSummaryRepo.findOne({
-        where: { crmProfileId, mid },
+        where: { crmKey, mid },
         order: { capturedAt: 'DESC' },
       });
 
@@ -982,7 +982,7 @@ export class VoiceTableService {
 
       const e = new VoiceIvrSummary();
       e.id = uuidv4();
-      e.crmProfileId = crmProfileId;
+      e.crmKey = crmKey;
       e.mid = mid;
       e.totalRecords = s.totalRecords;
       e.connectFail = s.connectFail;
@@ -996,7 +996,7 @@ export class VoiceTableService {
     } else {
       const s = summary as ParsedSummaryVoiceOp;
       const last = await this.opSummaryRepo.findOne({
-        where: { crmProfileId, mid },
+        where: { crmKey, mid },
         order: { capturedAt: 'DESC' },
       });
       const connectRate = s.connectRate.toFixed(2);
@@ -1015,7 +1015,7 @@ export class VoiceTableService {
 
       const e = new VoiceOpSummary();
       e.id = uuidv4();
-      e.crmProfileId = crmProfileId;
+      e.crmKey = crmKey;
       e.mid = mid;
       e.totalRecords = s.totalRecords;
       e.initCount = s.initCount;
@@ -1161,18 +1161,18 @@ export class VoiceTableService {
     return /HTTP (401|403)/.test(message);
   }
 
-  private buildDirectCrmProfileId(url: string): string {
+  private normalizeCrmKey(value: string): string {
     try {
-      const parsed = new URL(url);
-      return `direct:${parsed.origin}`;
+      const parsed = new URL(value);
+      return parsed.host.toLowerCase();
     } catch {
-      return 'direct:unknown';
+      return value.trim().toLowerCase() || 'unknown';
     }
   }
 
-  /** 插入或更新 VoiceCrawlState（以 crmProfileId+module+mid 为 key） */
+  /** 插入或更新 VoiceCrawlState（以 crmKey+module+mid 为 key） */
   private async upsertCrawlState(
-    crmProfileId: string,
+    crmKey: string,
     module: string,
     mid: number,
     update: Partial<
@@ -1183,14 +1183,14 @@ export class VoiceTableService {
     >,
   ): Promise<void> {
     const existing = await this.crawlStateRepo.findOne({
-      where: { crmProfileId, module, mid },
+      where: { crmKey, module, mid },
     });
     if (existing) {
       await this.crawlStateRepo.update(existing.id, update);
     } else {
       const s = new VoiceCrawlState();
       s.id = uuidv4();
-      s.crmProfileId = crmProfileId;
+      s.crmKey = crmKey;
       s.module = module;
       s.mid = mid;
       s.totalPages = update.totalPages ?? 1;

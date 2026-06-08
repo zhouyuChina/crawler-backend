@@ -106,7 +106,7 @@ export class CrmRequestRunnerService {
     try {
       if (def.isTable) {
         const result = await this.voiceTableService.startCrawl({
-          profileId: profile.id,
+          crmKey: profile.baseUrl,
           url,
           headers,
         });
