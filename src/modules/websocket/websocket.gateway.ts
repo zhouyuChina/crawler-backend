@@ -11,6 +11,10 @@ import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 
 const REQUEST_BODY_PREVIEW_LIMIT = 8 * 1024;
+const ROOM_WEBPAGE_UPDATES = 'webpage-updates';
+const ROOM_REQUEST_MONITOR = 'request-monitor';
+const ROOM_CALL_RECORDS = 'call-records';
+const ROOM_TABLE_CRAWL = 'table-crawl';
 
 @WebSocketGateway({
   cors: {
@@ -45,7 +49,6 @@ export class WebsocketGateway
 
   handleConnection(client: Socket) {
     this.logger.log(`Client connected: ${client.id}`);
-    client.emit('request:history', this.requestHistory);
   }
 
   handleDisconnect(client: Socket) {
@@ -59,7 +62,7 @@ export class WebsocketGateway
   ) {
     if (!client?.id) return { success: false };
     this.logger.log(`Client ${client.id} subscribed to webpage updates`);
-    client.join('webpage-updates');
+    client.join(ROOM_WEBPAGE_UPDATES);
     return { success: true };
   }
 
@@ -67,20 +70,67 @@ export class WebsocketGateway
   handleUnsubscribeWebpage(@ConnectedSocket() client: Socket) {
     if (!client?.id) return { success: false };
     this.logger.log(`Client ${client.id} unsubscribed from webpage updates`);
-    client.leave('webpage-updates');
+    client.leave(ROOM_WEBPAGE_UPDATES);
+    return { success: true };
+  }
+
+  @SubscribeMessage('subscribe:request-monitor')
+  handleSubscribeRequestMonitor(@ConnectedSocket() client: Socket) {
+    if (!client?.id) return { success: false };
+    this.logger.log(`Client ${client.id} subscribed to request monitor`);
+    client.join(ROOM_REQUEST_MONITOR);
+    client.emit('request:history', this.requestHistory);
+    return { success: true };
+  }
+
+  @SubscribeMessage('unsubscribe:request-monitor')
+  handleUnsubscribeRequestMonitor(@ConnectedSocket() client: Socket) {
+    if (!client?.id) return { success: false };
+    this.logger.log(`Client ${client.id} unsubscribed from request monitor`);
+    client.leave(ROOM_REQUEST_MONITOR);
+    return { success: true };
+  }
+
+  @SubscribeMessage('subscribe:call-records')
+  handleSubscribeCallRecords(@ConnectedSocket() client: Socket) {
+    if (!client?.id) return { success: false };
+    this.logger.log(`Client ${client.id} subscribed to call records`);
+    client.join(ROOM_CALL_RECORDS);
+    return { success: true };
+  }
+
+  @SubscribeMessage('unsubscribe:call-records')
+  handleUnsubscribeCallRecords(@ConnectedSocket() client: Socket) {
+    if (!client?.id) return { success: false };
+    this.logger.log(`Client ${client.id} unsubscribed from call records`);
+    client.leave(ROOM_CALL_RECORDS);
+    return { success: true };
+  }
+
+  @SubscribeMessage('subscribe:table-crawl')
+  handleSubscribeTableCrawl(@ConnectedSocket() client: Socket) {
+    if (!client?.id) return { success: false };
+    this.logger.log(`Client ${client.id} subscribed to table crawl`);
+    client.join(ROOM_TABLE_CRAWL);
+    return { success: true };
+  }
+
+  @SubscribeMessage('unsubscribe:table-crawl')
+  handleUnsubscribeTableCrawl(@ConnectedSocket() client: Socket) {
+    if (!client?.id) return { success: false };
+    this.logger.log(`Client ${client.id} unsubscribed from table crawl`);
+    client.leave(ROOM_TABLE_CRAWL);
     return { success: true };
   }
 
   broadcastWebpageCreated(webpage: any) {
-    this.server.to('webpage-updates').emit('webpage:created', webpage);
-    this.server.emit('webpage:created', webpage);
+    this.server.to(ROOM_WEBPAGE_UPDATES).emit('webpage:created', webpage);
   }
 
   broadcastWebpageDeleted(webpageId: string) {
     this.server
-      .to('webpage-updates')
+      .to(ROOM_WEBPAGE_UPDATES)
       .emit('webpage:deleted', { id: webpageId });
-    this.server.emit('webpage:deleted', { id: webpageId });
   }
 
   broadcastStatisticsUpdate(stats: any) {
@@ -96,7 +146,7 @@ export class WebsocketGateway
     status: 'processing';
   }) {
     this.upsertRequestHistory(data);
-    this.server.emit('request:received', data);
+    this.server.to(ROOM_REQUEST_MONITOR).emit('request:received', data);
     this.logger.log(`广播请求接收: ${data.method} ${data.url}`);
   }
 
@@ -115,7 +165,7 @@ export class WebsocketGateway
   }) {
     const safeData = this.sanitizeRequestEvent(data);
     this.upsertRequestHistory(safeData);
-    this.server.emit('request:processed', data);
+    this.server.to(ROOM_REQUEST_MONITOR).emit('request:processed', safeData);
     this.logger.log(`广播请求处理完成: ${data.status} - ${data.url}`);
   }
 
@@ -169,7 +219,7 @@ export class WebsocketGateway
     statusCode?: number;
     timestamp: string;
   }) {
-    this.server.emit('call-record:created', data);
+    this.server.to(ROOM_CALL_RECORDS).emit('call-record:created', data);
     this.logger.log(`广播通话记录创建: ${data.recordType}`);
   }
 
@@ -180,7 +230,7 @@ export class WebsocketGateway
     newData: any;
     timestamp: string;
   }) {
-    this.server.emit('data:changed', data);
+    this.server.to(ROOM_CALL_RECORDS).emit('data:changed', data);
     this.logger.log(`广播数据变更: ${data.recordType}`);
   }
 
@@ -193,7 +243,7 @@ export class WebsocketGateway
     status: string;
     timestamp: string;
   }) {
-    this.server.emit('call-record:updated', data);
+    this.server.to(ROOM_CALL_RECORDS).emit('call-record:updated', data);
     this.logger.log(`广播通话记录更新: ${data.recordType} - ${data.status}`);
   }
 
@@ -205,7 +255,7 @@ export class WebsocketGateway
     parsedData: any;
     timestamp: string;
   }) {
-    this.server.emit('call-status:changed', data);
+    this.server.to(ROOM_CALL_RECORDS).emit('call-status:changed', data);
     this.logger.log(`广播通话状态变更: ${data.recordType} → ${data.status}`);
   }
 
@@ -218,7 +268,7 @@ export class WebsocketGateway
     taskId: string;
     timestamp: string;
   }) {
-    this.server.emit('table-crawl:rows', data);
+    this.server.to(ROOM_TABLE_CRAWL).emit('table-crawl:rows', data);
     this.logger.log(
       `广播表格新增行: ${data.module} mid=${data.mid} page=${data.page} +${data.rows.length}`,
     );
@@ -234,7 +284,7 @@ export class WebsocketGateway
     capturedAt: string;
     taskId: string;
   }) {
-    this.server.emit('table-crawl:summary', data);
+    this.server.to(ROOM_TABLE_CRAWL).emit('table-crawl:summary', data);
     this.logger.log(
       `广播表格汇总: ${data.module} mid=${data.mid} pages=${data.pagesToFetch}/${data.totalPages}`,
     );
@@ -250,6 +300,6 @@ export class WebsocketGateway
     status: 'running' | 'completed' | 'failed' | 'throttled';
     error?: string;
   }) {
-    this.server.emit('table-crawl:progress', data);
+    this.server.to(ROOM_TABLE_CRAWL).emit('table-crawl:progress', data);
   }
 }

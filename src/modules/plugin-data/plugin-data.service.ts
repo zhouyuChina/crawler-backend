@@ -156,12 +156,13 @@ export class PluginDataService {
 
       const recordType = this.identifyRecordType(dto.url);
       const responseContent = content || htmlContent;
+      const dedupeKey = this.buildWebpageDedupeKey(domain, recordType);
       const responseBodyPreview = this.buildResponseBodyPreview(
         responseData.body,
         recordType,
       );
       const shouldPersistWebpage = this.shouldPersistWebpage(
-        recordType,
+        dedupeKey,
         responseContent,
       );
 
@@ -245,11 +246,15 @@ export class PluginDataService {
       const cookieHeader = this.extractCookieHeader(dto.headers);
       const shouldIngestCookies = sourcePluginId !== 'crawl-profile-scheduler';
       if (cookieHeader && shouldIngestCookies) {
+        const authFailureSample = responseData.body.slice(
+          0,
+          RESPONSE_BODY_PREVIEW_LIMIT,
+        );
         void this.crmAuthService
           .ingestPluginCookies(
             dto.url,
             cookieHeader,
-            responseData.body,
+            authFailureSample,
             responseData.statusCode,
           )
           .catch(() => {});
@@ -290,26 +295,34 @@ export class PluginDataService {
   }
 
   private shouldPersistWebpage(
-    recordType: string | null,
+    dedupeKey: string | null,
     content: string,
   ): boolean {
-    if (!recordType) return true;
+    if (!dedupeKey) return true;
 
-    const lastContent = this.lastPersistedContents.get(recordType);
+    const lastContent = this.lastPersistedContents.get(dedupeKey);
     if (lastContent !== content) {
-      this.lastPersistedContents.set(recordType, content);
-      this.lastDuplicateSampleAt.set(recordType, Date.now());
+      this.lastPersistedContents.set(dedupeKey, content);
+      this.lastDuplicateSampleAt.set(dedupeKey, Date.now());
       return true;
     }
 
     const now = Date.now();
-    const lastSampleAt = this.lastDuplicateSampleAt.get(recordType) ?? 0;
+    const lastSampleAt = this.lastDuplicateSampleAt.get(dedupeKey) ?? 0;
     if (now - lastSampleAt >= DUPLICATE_WEBPAGE_SAMPLE_MS) {
-      this.lastDuplicateSampleAt.set(recordType, now);
+      this.lastDuplicateSampleAt.set(dedupeKey, now);
       return true;
     }
 
     return false;
+  }
+
+  private buildWebpageDedupeKey(
+    domain: string,
+    recordType: string | null,
+  ): string | null {
+    if (!recordType) return null;
+    return `${domain}:${recordType}`;
   }
 
   private hasNoCallRecord(content: string): boolean {

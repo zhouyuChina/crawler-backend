@@ -445,6 +445,9 @@
             socket.on('connect', () => {
                 console.log('WebSocket 连接成功');
                 updateConnectionStatus(true);
+                socket.emit('subscribe:request-monitor');
+                socket.emit('subscribe:webpage');
+                socket.emit('subscribe:table-crawl');
             });
 
             socket.on('disconnect', () => {
