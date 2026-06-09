@@ -113,21 +113,6 @@ async function runHistoryBatch(
   strategy: VoiceTableStrategy,
   payload: WorkerPayload,
 ): Promise<WorkerResult> {
-  if (strategy.module !== 'voice_ivr') {
-    return {
-      success: true,
-      highestCompletedPage: 0,
-      anchorFound: false,
-      stoppedByBoundary: false,
-      completedInitialDate: null,
-      failedPages: 0,
-      module: strategy.module,
-      mid: payload.mid,
-      pagesToFetch: 0,
-      hasMoreHistory: false,
-    };
-  }
-
   const state = await dataSource.getRepository(VoiceCrawlState).findOne({
     where: { crmKey: payload.crmKey, module: strategy.module, mid: payload.mid },
   });
@@ -152,7 +137,10 @@ async function runHistoryBatch(
   logWorker(
     `history first-page module=${strategy.module} mid=${payload.mid} html=${firstHtml.length} totalPages=${currentTotalPages}`,
   );
-  const ivrBusinessDate = getIvrBusinessDate(firstParsed.rows as ParsedRowVoiceIvr[]);
+  const ivrBusinessDate =
+    strategy.module === 'voice_ivr'
+      ? getIvrBusinessDate(firstParsed.rows as ParsedRowVoiceIvr[])
+      : null;
   const drift = state.historyTotalPagesRef
     ? Math.max(0, currentTotalPages - state.historyTotalPagesRef)
     : 0;
@@ -185,12 +173,10 @@ async function runHistoryBatch(
     currentTotalPages,
     adjustedStart + (payload.pagesToFetch ?? HISTORY_BATCH_SIZE) - 1,
   );
-  const tailAnchorKeys = await fetchIvrTailAnchorKeys(
-    dataSource,
-    strategy,
-    payload,
-    currentTotalPages,
-  );
+  const tailAnchorKeys =
+    strategy.module === 'voice_ivr'
+      ? await fetchIvrTailAnchorKeys(dataSource, strategy, payload, currentTotalPages)
+      : new Set<string>();
   logWorker(
     `history batch range module=${strategy.module} mid=${payload.mid} page=${adjustedStart}-${batchEnd}/${currentTotalPages} anchors=${tailAnchorKeys.size}`,
   );
@@ -214,7 +200,10 @@ async function runHistoryBatch(
         label: '历史补全',
         updateCheckpoint: false,
         stopOnAnchorKeys: Array.from(tailAnchorKeys),
-        initialCompletedDate: ivrBusinessDate ?? undefined,
+        initialCompletedDate:
+          strategy.module === 'voice_ivr'
+            ? (ivrBusinessDate ?? undefined)
+            : undefined,
       },
     ],
     initialLastCompletedPage: adjustedStart - 1,
@@ -243,7 +232,7 @@ async function runHistoryBatch(
     historyNextPage: isDone ? null : batchResult.highestCompletedPage + 1,
     historyTotalPagesRef: isDone ? null : currentTotalPages,
     historyBatchFinishedAt: new Date(),
-    ...(batchResult.anchorFound && ivrBusinessDate
+    ...(strategy.module === 'voice_ivr' && batchResult.anchorFound && ivrBusinessDate
       ? { initialCompletedDate: ivrBusinessDate }
       : {}),
   });
@@ -287,7 +276,9 @@ async function runStartCrawl(
 
   let pagesToFetch: number;
   let pageRanges: WorkerPageRange[];
+  let shouldBackfillHistory = false;
   if (needsIvrDailyAnchor) {
+    shouldBackfillHistory = true;
     const tailAnchorKeys = await fetchIvrTailAnchorKeys(dataSource, strategy, payload, totalPages);
     const dailyCap = Math.min(totalPages, VOICE_TABLE_DAILY_MAX_PAGES);
     pagesToFetch = dailyCap;
@@ -332,6 +323,7 @@ async function runStartCrawl(
     const lastTotalPages = await getLastTotalPages(dataSource, payload.crmKey, strategy.module, payload.mid);
     if (lastTotalPages == null || totalPages < lastTotalPages) {
       pagesToFetch = totalPages;
+      shouldBackfillHistory = true;
     } else {
       pagesToFetch = Math.max(MIN_DETAIL_PAGES_PER_RUN, totalPages - lastTotalPages + 1);
     }
@@ -417,7 +409,13 @@ async function runStartCrawl(
       isIncomplete && crawlState ? crawlState.lastCompletedPage : Math.min(1, pagesToFetch),
   } as Required<WorkerPayload>);
 
-  if (needsIvrDailyAnchor && !batchResult.anchorFound && totalPages > VOICE_TABLE_DAILY_MAX_PAGES) {
+  const shouldScheduleHistory =
+    batchResult.success &&
+    !batchResult.anchorFound &&
+    totalPages > VOICE_TABLE_DAILY_MAX_PAGES &&
+    batchResult.highestCompletedPage < totalPages &&
+    shouldBackfillHistory;
+  if (shouldScheduleHistory) {
     const historyUpdate: Partial<VoiceCrawlState> = {
       historyStatus: 'pending',
     };

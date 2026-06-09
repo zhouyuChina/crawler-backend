@@ -203,6 +203,7 @@ export class VoiceTableService {
 
     let pagesToFetch: number;
     let pageRanges: PageRange[];
+    let shouldBackfillHistory = false;
     const ivrBusinessDate =
       strategy.module === 'voice_ivr'
         ? this.getIvrBusinessDate(firstParsed.rows as ParsedRowVoiceIvr[])
@@ -213,6 +214,7 @@ export class VoiceTableService {
       crawlState?.initialCompletedDate !== ivrBusinessDate;
 
     if (needsIvrDailyAnchor) {
+      shouldBackfillHistory = true;
       const tailAnchorKeys = await this.fetchIvrTailAnchorKeys({
         strategy,
         crmKey,
@@ -241,7 +243,7 @@ export class VoiceTableService {
         `IVR 每日初始锚点 ${key}: date=${ivrBusinessDate} anchors=${tailAnchorKeys.size} 日常上限 ${dailyCap}/${newTotalPages} 页`,
       );
     } else if (strategy.module === 'voice_ivr') {
-      pagesToFetch = newTotalPages;
+      pagesToFetch = Math.min(newTotalPages, VOICE_TABLE_DAILY_MAX_PAGES);
       pageRanges =
         pagesToFetch >= 2
           ? [
@@ -277,13 +279,18 @@ export class VoiceTableService {
       );
       if (lastTotalPages == null || newTotalPages < lastTotalPages) {
         pagesToFetch = newTotalPages;
+        shouldBackfillHistory = true;
       } else {
         pagesToFetch = Math.max(
           MIN_DETAIL_PAGES_PER_RUN,
           newTotalPages - lastTotalPages + 1,
         );
       }
-      pagesToFetch = Math.min(pagesToFetch, newTotalPages);
+      pagesToFetch = Math.min(
+        pagesToFetch,
+        newTotalPages,
+        VOICE_TABLE_DAILY_MAX_PAGES,
+      );
       pageRanges =
         pagesToFetch >= 2
           ? [
@@ -399,7 +406,6 @@ export class VoiceTableService {
         status: 'failed',
       });
       if (
-        strategy.module === 'voice_ivr' &&
         hasPendingHistory &&
         newTotalPages > VOICE_TABLE_DAILY_MAX_PAGES
       ) {
@@ -457,10 +463,9 @@ export class VoiceTableService {
           this.activeMap.delete(key);
           // 日常锚点扫描触碰上限且未命中尾页锚点，调度历史补全批次
           if (
-            strategy.module === 'voice_ivr' &&
             !runResult.anchorFound &&
             newTotalPages > VOICE_TABLE_DAILY_MAX_PAGES &&
-            (needsIvrDailyAnchor || hasPendingHistory)
+            (shouldBackfillHistory || hasPendingHistory)
           ) {
             void this.scheduleAndRunHistoryBatch({
               strategy,
@@ -488,7 +493,6 @@ export class VoiceTableService {
           : crawlState?.initialCompletedDate,
       });
       if (
-        strategy.module === 'voice_ivr' &&
         hasPendingHistory &&
         newTotalPages > VOICE_TABLE_DAILY_MAX_PAGES
       ) {
@@ -969,8 +973,6 @@ export class VoiceTableService {
     key: string;
     taskId: string;
   }): Promise<void> {
-    if (args.strategy.module !== 'voice_ivr') return;
-
     const maxBatchesRaw = process.env.VOICE_TABLE_WORKER_CHAIN_MAX;
     const maxBatches =
       maxBatchesRaw == null || maxBatchesRaw.trim() === ''
