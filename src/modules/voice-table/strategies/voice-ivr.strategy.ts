@@ -38,8 +38,23 @@ function hasIvrSummary(html: string): boolean {
   return SUMMARY_PATTERNS.totalRecords.test(html);
 }
 
+/**
+ * 从整页 HTML 中截取 listDiv 表格片段，减少 Cheerio 需要解析的 DOM 体积。
+ * listDiv 通常只占全页 HTML 的 10-20%，可以显著降低每页内存峰值。
+ */
+function sliceToListDiv(html: string): string {
+  const start = html.indexOf('<div id="listDiv"');
+  if (start === -1) return html;
+  const tableStart = html.indexOf('<table', start);
+  if (tableStart === -1) return html.slice(start);
+  const tableEnd = html.indexOf('</table>', tableStart);
+  if (tableEnd === -1) return html.slice(start);
+  return html.slice(start, tableEnd + 8) + '</div>';
+}
+
 function extractIvrRows(html: string): ParsedRowVoiceIvr[] {
-  const $ = cheerio.load(html);
+  const fragment = sliceToListDiv(html);
+  const $ = cheerio.load(fragment);
   const rows: ParsedRowVoiceIvr[] = [];
 
   // 仅在 listDiv 内寻找带 checkbox 的行(排除表头)

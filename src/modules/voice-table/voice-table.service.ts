@@ -37,6 +37,13 @@ const RESUME_OVERLAP_PAGES = 2;
 const PROGRESS_LOG_INTERVAL_PAGES = 100;
 const IVR_TAIL_ANCHOR_PAGES = 2;
 
+/** 日常扫描每次最多抓取页数；超出部分交由历史补全任务分批续跑，防止单次长任务 OOM */
+const VOICE_TABLE_DAILY_MAX_PAGES = 2000;
+/** 历史补全每批抓取页数 */
+const HISTORY_BATCH_SIZE = 100;
+/** checkpoint 写库间隔页数，降低高频 DB 往返开销 */
+const CHECKPOINT_INTERVAL_PAGES = 50;
+
 type Headers = Record<string, string>;
 
 interface PageRange {
@@ -76,6 +83,8 @@ export class VoiceTableService {
   private throttleMap = new Map<string, number>();
   /** key: `${module}:${mid}` -> active flag */
   private activeMap = new Map<string, boolean>();
+  /** key: `${crmKey}:${module}:${mid}` -> true when history batch is running */
+  private historyActiveMap = new Map<string, boolean>();
 
   constructor(
     @InjectRepository(VoiceIvrRecord)
@@ -144,6 +153,9 @@ export class VoiceTableService {
     const crawlState = await this.crawlStateRepo.findOne({
       where: { crmKey, module: strategy.module, mid },
     });
+    const hasPendingHistory =
+      crawlState?.historyStatus === 'pending' ||
+      crawlState?.historyStatus === 'running';
     const isIncomplete =
       crawlState &&
       crawlState.status !== 'completed' &&
@@ -161,7 +173,6 @@ export class VoiceTableService {
       crawlState?.initialCompletedDate !== ivrBusinessDate;
 
     if (needsIvrDailyAnchor) {
-      pagesToFetch = newTotalPages;
       const tailAnchorKeys = await this.fetchIvrTailAnchorKeys({
         strategy,
         crmKey,
@@ -170,12 +181,15 @@ export class VoiceTableService {
         headers,
         totalPages: newTotalPages,
       });
+      // 每日锚点扫描上限：超出页数由历史补全任务分批续跑，避免单次长任务 OOM
+      const dailyCap = Math.min(newTotalPages, VOICE_TABLE_DAILY_MAX_PAGES);
+      pagesToFetch = dailyCap;
       pageRanges =
-        pagesToFetch >= 2
+        dailyCap >= 2
           ? [
               {
                 start: 2,
-                end: pagesToFetch,
+                end: dailyCap,
                 label: '每日初始锚点',
                 updateCheckpoint: true,
                 stopOnAnchorKeys: tailAnchorKeys,
@@ -184,7 +198,7 @@ export class VoiceTableService {
             ]
           : [];
       this.logger.log(
-        `IVR 每日初始锚点 ${key}: date=${ivrBusinessDate} anchors=${tailAnchorKeys.size} 目标共 ${pagesToFetch} 页`,
+        `IVR 每日初始锚点 ${key}: date=${ivrBusinessDate} anchors=${tailAnchorKeys.size} 日常上限 ${dailyCap}/${newTotalPages} 页`,
       );
     } else if (strategy.module === 'voice_ivr') {
       pagesToFetch = newTotalPages;
@@ -344,6 +358,25 @@ export class VoiceTableService {
       await this.upsertCrawlState(crmKey, strategy.module, mid, {
         status: 'failed',
       });
+      if (
+        strategy.module === 'voice_ivr' &&
+        hasPendingHistory &&
+        newTotalPages > VOICE_TABLE_DAILY_MAX_PAGES
+      ) {
+        void this.scheduleAndRunHistoryBatch({
+          strategy,
+          crmKey,
+          mid,
+          baseUrl: input.url,
+          headers,
+          key,
+          totalPagesRef: newTotalPages,
+          nextPage: pagesToFetch + 1,
+          ivrBusinessDate: ivrBusinessDate ?? undefined,
+        }).catch((err) =>
+          this.logger.error(`历史补全调度失败 ${key}: ${err.message}`),
+        );
+      }
       return {
         success: true,
         module: strategy.module,
@@ -360,6 +393,7 @@ export class VoiceTableService {
     if (pageRanges.length > 0) {
       this.throttleMap.set(key, now);
       this.activeMap.set(key, true);
+      const runResult = { anchorFound: false };
       void this.runRemainingPages({
         strategy,
         crmKey,
@@ -374,12 +408,34 @@ export class VoiceTableService {
           : Math.min(1, pagesToFetch),
         taskId,
         key,
+        runResult,
       })
         .catch((err) => {
           this.logger.error(`后台抓取异常 ${key}: ${err.message}`);
         })
         .finally(() => {
           this.activeMap.delete(key);
+          // 日常锚点扫描触碰上限且未命中尾页锚点，调度历史补全批次
+          if (
+            strategy.module === 'voice_ivr' &&
+            !runResult.anchorFound &&
+            newTotalPages > VOICE_TABLE_DAILY_MAX_PAGES &&
+            (needsIvrDailyAnchor || hasPendingHistory)
+          ) {
+            void this.scheduleAndRunHistoryBatch({
+              strategy,
+              crmKey,
+              mid,
+              baseUrl: input.url,
+              headers,
+              key,
+              totalPagesRef: newTotalPages,
+              nextPage: pagesToFetch + 1,
+              ivrBusinessDate: ivrBusinessDate ?? undefined,
+            }).catch((err) =>
+              this.logger.error(`历史补全调度失败 ${key}: ${err.message}`),
+            );
+          }
         });
     } else {
       // 没有后续页需要抓（resumeFromPage > pagesToFetch 说明已全部完成）
@@ -391,6 +447,25 @@ export class VoiceTableService {
           ? ivrBusinessDate
           : crawlState?.initialCompletedDate,
       });
+      if (
+        strategy.module === 'voice_ivr' &&
+        hasPendingHistory &&
+        newTotalPages > VOICE_TABLE_DAILY_MAX_PAGES
+      ) {
+        void this.scheduleAndRunHistoryBatch({
+          strategy,
+          crmKey,
+          mid,
+          baseUrl: input.url,
+          headers,
+          key,
+          totalPagesRef: newTotalPages,
+          nextPage: pagesToFetch + 1,
+          ivrBusinessDate: ivrBusinessDate ?? undefined,
+        }).catch((err) =>
+          this.logger.error(`历史补全调度失败 ${key}: ${err.message}`),
+        );
+      }
     }
 
     return {
@@ -417,6 +492,8 @@ export class VoiceTableService {
     initialLastCompletedPage: number;
     taskId: string;
     key: string;
+    /** 回传锚点是否命中，供调用方判断是否需要调度历史补全 */
+    runResult?: { anchorFound: boolean };
   }): Promise<void> {
     const {
       strategy,
@@ -430,6 +507,7 @@ export class VoiceTableService {
       initialLastCompletedPage,
       taskId,
       key,
+      runResult,
     } = args;
     const failedPages: Array<{ page: number; error: string }> = [];
     let authAborted = false;
@@ -454,10 +532,14 @@ export class VoiceTableService {
           });
           if (range.updateCheckpoint) {
             highestCompletedPage = Math.max(highestCompletedPage, page);
-            await this.upsertCrawlState(crmKey, strategy.module, mid, {
-              lastCompletedPage: highestCompletedPage,
-              status: 'running',
-            });
+            // 每 CHECKPOINT_INTERVAL_PAGES 页或到达 range 末尾时才写库，减少 DB 压力
+            const isRangeEnd = page === range.end;
+            if (isRangeEnd || page % CHECKPOINT_INTERVAL_PAGES === 0) {
+              await this.upsertCrawlState(crmKey, strategy.module, mid, {
+                lastCompletedPage: highestCompletedPage,
+                status: 'running',
+              });
+            }
           }
           if (this.shouldLogProgress(page, range.end, outcome.insertedCount)) {
             this.logger.log(
@@ -467,6 +549,7 @@ export class VoiceTableService {
           if (range.stopOnAnchorKeys && outcome.containsAnchor) {
             stoppedByBoundary = true;
             completedInitialDate = range.initialCompletedDate ?? null;
+            if (runResult) runResult.anchorFound = true;
             this.logger.log(
               `IVR 命中尾页锚点 ${key}: page=${page}/${pagesToFetch}, 每日初始完成`,
             );
@@ -523,7 +606,9 @@ export class VoiceTableService {
         }
       }
       if (authAborted || stoppedByBoundary) break;
-      if (range.initialCompletedDate) {
+      // 只有真实跑到本轮发现的尾页，才可认为每日初始锚点完成。
+      // 被 VOICE_TABLE_DAILY_MAX_PAGES 截断的 range 不能提前写 initialCompletedDate。
+      if (range.initialCompletedDate && range.end >= discoveredTotalPages) {
         completedInitialDate = range.initialCompletedDate;
       }
     }
@@ -611,6 +696,8 @@ export class VoiceTableService {
     pagesToFetch: number;
     taskId: string;
     anchorKeys?: Set<string>;
+    /** 历史补全模式：跳过全量 rows WS 广播，每 50 页发一次 progress */
+    isHistoryMode?: boolean;
   }): Promise<CrawlPageOutcome> {
     const {
       strategy,
@@ -622,6 +709,7 @@ export class VoiceTableService {
       pagesToFetch,
       taskId,
       anchorKeys,
+      isHistoryMode,
     } = args;
     const pageUrl = ensurePageIdParam(baseUrl, page);
     const html = await this.fetchHtmlWithRetry(pageUrl, headers);
@@ -634,7 +722,8 @@ export class VoiceTableService {
       parsed.rows,
     );
 
-    if (inserted.length > 0) {
+    // 历史补全模式跳过全量行广播（历史数据不属于实时面板关注范围）
+    if (!isHistoryMode && inserted.length > 0) {
       this.ws.broadcastVoiceTableRows({
         module: strategy.module,
         mid,
@@ -645,14 +734,21 @@ export class VoiceTableService {
       });
     }
 
-    this.ws.broadcastVoiceTableProgress({
-      module: strategy.module,
-      mid,
-      taskId,
-      page,
-      pagesToFetch,
-      status: page === pagesToFetch ? 'completed' : 'running',
-    });
+    // 历史补全每 50 页或批次结束时才推进度，减少 WS 对象分配
+    const shouldBroadcastProgress =
+      !isHistoryMode ||
+      page % 50 === 0 ||
+      page === pagesToFetch;
+    if (shouldBroadcastProgress) {
+      this.ws.broadcastVoiceTableProgress({
+        module: strategy.module,
+        mid,
+        taskId,
+        page,
+        pagesToFetch,
+        status: page === pagesToFetch ? 'completed' : 'running',
+      });
+    }
     return {
       insertedCount: inserted.length,
       containsAnchor:
@@ -868,11 +964,7 @@ export class VoiceTableService {
           'src',
           'dst',
           'statusType',
-          'reason',
-          'task',
           'callDate',
-          'sourceUrl',
-          'createdAt',
         ])
         .execute();
       return (result.raw as any[]) ?? [];
@@ -931,16 +1023,9 @@ export class VoiceTableService {
         'crmKey',
         'mid',
         'recordKey',
-        'task',
         'src',
         'dst',
-        'agent',
-        'reason',
-        'duration',
         'callDate',
-        'endDate',
-        'sourceUrl',
-        'createdAt',
       ])
       .execute();
     return (result.raw as any[]) ?? [];
@@ -1170,7 +1255,9 @@ export class VoiceTableService {
     }
   }
 
-  /** 插入或更新 VoiceCrawlState（以 crmKey+module+mid 为 key） */
+  /** 插入或更新 VoiceCrawlState（以 crmKey+module+mid 为 key）。
+   *  先直接 UPDATE，只有行不存在时才 INSERT，避免每次都 findOne。
+   */
   private async upsertCrawlState(
     crmKey: string,
     module: string,
@@ -1178,16 +1265,31 @@ export class VoiceTableService {
     update: Partial<
       Pick<
         VoiceCrawlState,
-        'totalPages' | 'lastCompletedPage' | 'status' | 'initialCompletedDate'
+        | 'totalPages'
+        | 'lastCompletedPage'
+        | 'status'
+        | 'initialCompletedDate'
+        | 'historyStatus'
+        | 'historyNextPage'
+        | 'historyTotalPagesRef'
+        | 'historyLastRecordId'
+        | 'historyBatchStartedAt'
+        | 'historyBatchFinishedAt'
       >
     >,
   ): Promise<void> {
-    const existing = await this.crawlStateRepo.findOne({
-      where: { crmKey, module, mid },
-    });
-    if (existing) {
-      await this.crawlStateRepo.update(existing.id, update);
-    } else {
+    const result = await this.crawlStateRepo
+      .createQueryBuilder()
+      .update(VoiceCrawlState)
+      .set(update)
+      .where('"crmKey" = :crmKey AND module = :module AND mid = :mid', {
+        crmKey,
+        module,
+        mid,
+      })
+      .execute();
+
+    if (result.affected === 0) {
       const s = new VoiceCrawlState();
       s.id = uuidv4();
       s.crmKey = crmKey;
@@ -1197,8 +1299,235 @@ export class VoiceTableService {
       s.lastCompletedPage = update.lastCompletedPage ?? 0;
       s.status = (update.status ?? 'running') as CrawlStateStatus;
       s.initialCompletedDate = update.initialCompletedDate ?? null;
+      s.historyStatus = update.historyStatus ?? null;
+      s.historyNextPage = update.historyNextPage ?? null;
+      s.historyTotalPagesRef = update.historyTotalPagesRef ?? null;
+      s.historyLastRecordId = update.historyLastRecordId ?? null;
+      s.historyBatchStartedAt = update.historyBatchStartedAt ?? null;
+      s.historyBatchFinishedAt = update.historyBatchFinishedAt ?? null;
       await this.crawlStateRepo.save(s);
     }
+  }
+
+  // ── 历史补全 ──────────────────────────────────────────────────────────────
+
+  /**
+   * 在日常扫描触碰上限后，将历史补全游标写入 DB，然后（内存允许时）立即启动一批。
+   */
+  private async scheduleAndRunHistoryBatch(args: {
+    strategy: VoiceTableStrategy;
+    crmKey: string;
+    mid: number;
+    baseUrl: string;
+    headers: Headers;
+    key: string;
+    totalPagesRef: number;
+    nextPage: number;
+    ivrBusinessDate?: string;
+  }): Promise<void> {
+    const { strategy, crmKey, mid, key, totalPagesRef, nextPage } = args;
+
+    // 写入或更新历史游标（仅当尚无待运行游标时才覆盖 nextPage）
+    const existing = await this.crawlStateRepo.findOne({
+      where: { crmKey, module: strategy.module, mid },
+    });
+    const alreadyPending =
+      existing?.historyStatus === 'pending' ||
+      existing?.historyStatus === 'running';
+
+    await this.upsertCrawlState(crmKey, strategy.module, mid, {
+      historyStatus: 'pending',
+      // 只有首次设置或已完成后重置时才更新 nextPage 和 totalPagesRef
+      ...(alreadyPending
+        ? {}
+        : {
+            historyNextPage: nextPage,
+            historyTotalPagesRef: totalPagesRef,
+          }),
+    });
+
+    // 内存水位检查：超过 70% 时跳过本次批次，等下一个 5 分钟再试
+    const { heapUsed, heapTotal } = process.memoryUsage();
+    const memRatio = heapUsed / heapTotal;
+    if (memRatio > 0.70) {
+      this.logger.warn(
+        `历史补全跳过（内存水位 ${(memRatio * 100).toFixed(1)}% > 70%）${key}`,
+      );
+      return;
+    }
+
+    if (this.historyActiveMap.get(key)) return;
+    this.historyActiveMap.set(key, true);
+    try {
+      await this.runHistoryBatch(args);
+    } finally {
+      this.historyActiveMap.delete(key);
+    }
+  }
+
+  /**
+   * 执行一批历史补全（HISTORY_BATCH_SIZE 页）。
+   * - 通过 totalPagesRef diff 估算页码漂移，自动调整起始页。
+   * - 超过内存危险水位（85%）时中断批次并保存进度。
+   * - IVR 每批重新获取尾页锚点，命中后标记 initialCompletedDate。
+   */
+  private async runHistoryBatch(args: {
+    strategy: VoiceTableStrategy;
+    crmKey: string;
+    mid: number;
+    baseUrl: string;
+    headers: Headers;
+    key: string;
+    ivrBusinessDate?: string;
+  }): Promise<void> {
+    const { strategy, crmKey, mid, baseUrl, headers, key, ivrBusinessDate } =
+      args;
+
+    const state = await this.crawlStateRepo.findOne({
+      where: { crmKey, module: strategy.module, mid },
+    });
+    if (!state || state.historyStatus !== 'pending') return;
+
+    // 获取当前总页数（同时验证 Cookie 是否仍有效）
+    let currentTotalPages: number;
+    try {
+      const firstHtml = await this.fetchHtml(
+        ensurePageIdParam(baseUrl, 1),
+        headers,
+      );
+      const firstParsed = strategy.parse(firstHtml);
+      currentTotalPages = firstParsed.totalPages || 1;
+    } catch (err: any) {
+      this.logger.warn(`历史补全获取首页失败 ${key}: ${err.message}`);
+      return;
+    }
+
+    // 计算页码漂移并修正起始页
+    const drift = state.historyTotalPagesRef
+      ? Math.max(0, currentTotalPages - state.historyTotalPagesRef)
+      : 0;
+    const adjustedStart = Math.min(
+      currentTotalPages,
+      (state.historyNextPage ?? VOICE_TABLE_DAILY_MAX_PAGES + 1) + drift,
+    );
+
+    if (adjustedStart > currentTotalPages) {
+      // 所有历史页已处理完毕
+      await this.upsertCrawlState(crmKey, strategy.module, mid, {
+        historyStatus: 'completed',
+        historyBatchFinishedAt: new Date(),
+      });
+      this.logger.log(`历史补全已完成 ${key}: totalPages=${currentTotalPages}`);
+      return;
+    }
+
+    const batchEnd = Math.min(
+      currentTotalPages,
+      adjustedStart + HISTORY_BATCH_SIZE - 1,
+    );
+
+    // 标记批次开始
+    await this.upsertCrawlState(crmKey, strategy.module, mid, {
+      historyStatus: 'running',
+      historyNextPage: adjustedStart,
+      historyTotalPagesRef: currentTotalPages,
+      historyBatchStartedAt: new Date(),
+    });
+    this.logger.log(
+      `历史补全批次开始 ${key}: page=${adjustedStart}-${batchEnd}/${currentTotalPages} drift=${drift}`,
+    );
+
+    // IVR 重新获取尾页锚点（每批获取，2 次额外 fetch，代价小）
+    let tailAnchorKeys: Set<string> | undefined;
+    if (strategy.module === 'voice_ivr' && ivrBusinessDate) {
+      try {
+        tailAnchorKeys = await this.fetchIvrTailAnchorKeys({
+          strategy,
+          crmKey,
+          mid,
+          baseUrl,
+          headers,
+          totalPages: currentTotalPages,
+        });
+      } catch {
+        // 失败时不阻断批次，只是无法命中锚点
+      }
+    }
+
+    const taskId = uuidv4();
+    let anchorFoundInBatch = false;
+    let checkpointPage = adjustedStart - 1;
+
+    for (let page = adjustedStart; page <= batchEnd; page++) {
+      // 内存危险水位检查
+      const { heapUsed, heapTotal } = process.memoryUsage();
+      if (heapUsed / heapTotal > 0.85) {
+        this.logger.warn(
+          `历史补全内存告警，暂停批次于 page=${page} ${key}`,
+        );
+        break;
+      }
+
+      try {
+        const outcome = await this.crawlPage({
+          strategy,
+          crmKey,
+          mid,
+          baseUrl,
+          headers,
+          page,
+          pagesToFetch: batchEnd,
+          taskId,
+          anchorKeys: tailAnchorKeys,
+          isHistoryMode: true,
+        });
+
+        checkpointPage = page;
+
+        if (tailAnchorKeys && outcome.containsAnchor) {
+          anchorFoundInBatch = true;
+          this.logger.log(
+            `历史补全命中 IVR 尾页锚点 ${key}: page=${page}, 初始化完成`,
+          );
+          break;
+        }
+
+        // 历史补全每 CHECKPOINT_INTERVAL_PAGES 页记录一次进度
+        if (page % CHECKPOINT_INTERVAL_PAGES === 0 || page === batchEnd) {
+          await this.upsertCrawlState(crmKey, strategy.module, mid, {
+            historyNextPage: page + 1,
+            historyTotalPagesRef: currentTotalPages,
+          });
+        }
+      } catch (err: any) {
+        this.logger.warn(`历史补全 page=${page} 失败 ${key}: ${err.message}`);
+        // 历史补全宁可下轮重扫当前页，也不要跳过失败页造成漏数。
+        break;
+      }
+
+      if (page < batchEnd) await sleep(PAGE_DELAY_MS);
+    }
+
+    // 批次结束：更新游标
+    const isDone = anchorFoundInBatch || checkpointPage >= currentTotalPages;
+    const nextHistoryPage = isDone
+      ? null
+      : Math.max(adjustedStart, checkpointPage + 1);
+
+    await this.upsertCrawlState(crmKey, strategy.module, mid, {
+      historyStatus: isDone ? 'completed' : 'pending',
+      historyNextPage: nextHistoryPage,
+      historyTotalPagesRef: isDone ? null : currentTotalPages,
+      historyBatchFinishedAt: new Date(),
+      ...(anchorFoundInBatch && ivrBusinessDate
+        ? { initialCompletedDate: ivrBusinessDate }
+        : {}),
+    });
+
+    this.logger.log(
+      `历史补全批次完成 ${key}: page=${adjustedStart}-${checkpointPage}` +
+        ` anchorFound=${anchorFoundInBatch} done=${isDone}`,
+    );
   }
 }
 
