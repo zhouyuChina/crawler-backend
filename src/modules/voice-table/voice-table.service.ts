@@ -6,6 +6,7 @@ import * as https from 'https';
 import { fork } from 'child_process';
 import { existsSync } from 'fs';
 import { join } from 'path';
+import { getHeapStatistics } from 'v8';
 import { v4 as uuidv4 } from 'uuid';
 
 import { WebsocketGateway } from '../websocket/websocket.gateway';
@@ -1282,16 +1283,18 @@ export class VoiceTableService {
   }
 
   private getHeapUsageRatio(): number {
-    const { heapUsed, heapTotal } = process.memoryUsage();
-    return heapTotal > 0 ? heapUsed / heapTotal : 0;
+    const { heapUsed } = process.memoryUsage();
+    const { heap_size_limit: heapLimit } = getHeapStatistics();
+    return heapLimit > 0 ? heapUsed / heapLimit : 0;
   }
 
   private formatHeapUsage(): string {
     const { heapUsed, heapTotal, rss } = process.memoryUsage();
+    const { heap_size_limit: heapLimit } = getHeapStatistics();
     const mb = 1024 * 1024;
     return `heap=${(heapUsed / mb).toFixed(1)}/${(heapTotal / mb).toFixed(
       1,
-    )}MB rss=${(rss / mb).toFixed(1)}MB`;
+    )}MB limit=${(heapLimit / mb).toFixed(1)}MB rss=${(rss / mb).toFixed(1)}MB`;
   }
 
   private forceGcIfAvailable(reason: string): void {
