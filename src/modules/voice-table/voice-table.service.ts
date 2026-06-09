@@ -563,6 +563,8 @@ export class VoiceTableService {
         };
       }
 
+      await this.drainHistoryWorkerChain(args);
+
       this.ws.broadcastVoiceTableProgress({
         module: args.strategy.module,
         mid: args.mid,
@@ -916,6 +918,79 @@ export class VoiceTableService {
     return workerPath;
   }
 
+  private async drainHistoryWorkerChain(args: {
+    crmKey: string;
+    strategy: VoiceTableStrategy;
+    mid: number;
+    baseUrl: string;
+    headers: Headers;
+    key: string;
+    taskId: string;
+  }): Promise<void> {
+    if (args.strategy.module !== 'voice_ivr') return;
+
+    const maxBatchesRaw = process.env.VOICE_TABLE_WORKER_CHAIN_MAX;
+    const maxBatches =
+      maxBatchesRaw == null || maxBatchesRaw.trim() === ''
+        ? Number.POSITIVE_INFINITY
+        : Math.max(0, parseInt(maxBatchesRaw, 10));
+    if (maxBatches === 0) return;
+
+    for (let i = 0; i < maxBatches; i++) {
+      this.forceGcIfAvailable(`history-chain-before-${i + 1}`);
+      if (this.getHeapUsageRatio() >= MEMORY_PAUSE_HEAP_RATIO) {
+        this.logger.warn(
+          `历史 worker 连续领取暂停（主进程内存水位过高）${args.key}: heap=${this.formatHeapUsage()}`,
+        );
+        return;
+      }
+
+      const result = await this.runVoiceTableWorker({
+        mode: 'history',
+        crmKey: args.crmKey,
+        module: args.strategy.module,
+        mid: args.mid,
+        baseUrl: args.baseUrl,
+        headers: args.headers,
+        pagesToFetch: HISTORY_BATCH_SIZE,
+      });
+
+      if (!result.success) {
+        this.logger.warn(
+          `历史 worker batch 失败 ${args.key}: ${result.error ?? 'unknown'}`,
+        );
+        this.ws.broadcastVoiceTableProgress({
+          module: args.strategy.module,
+          mid: args.mid,
+          taskId: args.taskId,
+          page: result.highestCompletedPage || 0,
+          pagesToFetch: result.pagesToFetch ?? 0,
+          status: 'failed',
+          error: result.error,
+        });
+        return;
+      }
+
+      this.forceGcIfAvailable(`history-chain-after-${i + 1}`);
+      if (!result.hasMoreHistory) {
+        this.logger.log(`历史 worker 补全已无待领取 batch ${args.key}`);
+        return;
+      }
+
+      this.logger.log(
+        `历史 worker batch 完成 ${args.key}: ${i + 1}/${Number.isFinite(maxBatches) ? maxBatches : '∞'} page=${result.highestCompletedPage}/${result.totalPages}`,
+      );
+      this.ws.broadcastVoiceTableProgress({
+        module: args.strategy.module,
+        mid: args.mid,
+        taskId: args.taskId,
+        page: result.highestCompletedPage,
+        pagesToFetch: result.totalPages ?? result.pagesToFetch ?? 0,
+        status: 'running',
+      });
+    }
+  }
+
   private async runVoiceTableWorker(payload: Record<string, any>): Promise<{
     success: boolean;
     highestCompletedPage: number;
@@ -926,6 +1001,7 @@ export class VoiceTableService {
     mid?: number;
     totalPages?: number;
     pagesToFetch?: number;
+    hasMoreHistory?: boolean;
     error?: string;
   }> {
     const workerPath = this.resolveWorkerPath();
@@ -1215,6 +1291,21 @@ export class VoiceTableService {
     return `heap=${(heapUsed / mb).toFixed(1)}/${(heapTotal / mb).toFixed(
       1,
     )}MB rss=${(rss / mb).toFixed(1)}MB`;
+  }
+
+  private forceGcIfAvailable(reason: string): void {
+    const maybeGc = (globalThis as typeof globalThis & { gc?: () => void }).gc;
+    if (typeof maybeGc !== 'function') return;
+
+    const before = this.formatHeapUsage();
+    try {
+      maybeGc();
+      this.logger.debug(
+        `主动 GC 完成 ${reason}: before=${before} after=${this.formatHeapUsage()}`,
+      );
+    } catch (err: any) {
+      this.logger.warn(`主动 GC 失败 ${reason}: ${err.message}`);
+    }
   }
 
   private async getLastTotalPages(
