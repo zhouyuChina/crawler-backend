@@ -32,13 +32,21 @@ import {
   VoiceTableStrategy,
 } from './strategies/strategy.types';
 
+/** 同一表格（crmKey+module+mid）两次明细抓取的最小间隔，5 分钟内重复触发只写首页 */
 const THROTTLE_MS = 5 * 60 * 1000;
+/** 翻页间隔，避免对 CRM 请求过于密集 */
 const PAGE_DELAY_MS = 200;
+/** 单页抓取失败后的最大重试次数（实际最多尝试 MAX_RETRIES + 1 次） */
 const MAX_RETRIES = 2;
+/** 单页 HTTP 请求超时（毫秒） */
 const REQUEST_TIMEOUT_MS = 30000;
+/** 增量抓取时每次至少处理的页数（总页数不变时也会扫这么多页做查重） */
 const MIN_DETAIL_PAGES_PER_RUN = 10;
+/** 断点续抓时往回重叠的页数，防止页码漂移或末页半完成导致漏数据 */
 const RESUME_OVERLAP_PAGES = 2;
+/** 明细进度日志输出间隔页数 */
 const PROGRESS_LOG_INTERVAL_PAGES = 100;
+/** IVR 尾页锚点检测范围：从倒数第 N 页开始比对已知 recordId */
 const IVR_TAIL_ANCHOR_PAGES = 2;
 
 /** 单次日常明细扫描最多处理页数；超出部分交由历史补全任务分批续跑，防止单个长循环 OOM */
@@ -47,9 +55,13 @@ const VOICE_TABLE_DAILY_MAX_PAGES = 100;
 const HISTORY_BATCH_SIZE = 50;
 /** checkpoint 写库间隔页数，降低高频 DB 往返开销 */
 const CHECKPOINT_INTERVAL_PAGES = 50;
+/** 堆内存使用率超过此比例时暂停明细扫描，等下一轮再试 */
 const MEMORY_PAUSE_HEAP_RATIO = 0.7;
+/** 堆内存使用率超过此比例时强制终止 worker 子进程 */
 const MEMORY_DANGER_HEAP_RATIO = 0.85;
+/** 单页 HTML 响应体大小上限（2MB），超出则拒绝 */
 const MAX_VOICE_TABLE_HTML_BYTES = 2 * 1024 * 1024;
+/** worker 子进程默认超时（毫秒），超时则 kill */
 const DEFAULT_WORKER_TIMEOUT_MS = 5 * 60 * 1000;
 
 type Headers = Record<string, string>;
