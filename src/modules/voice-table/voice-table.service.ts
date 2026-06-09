@@ -130,6 +130,18 @@ export class VoiceTableService {
       `[mem-diagnose] voice-table start ${key}: heap=${this.formatHeapUsage()}`,
     );
 
+    const workerStartResult = await this.tryStartCrawlInWorker({
+      crmKey,
+      strategy,
+      mid,
+      baseUrl: input.url,
+      headers,
+      key,
+      taskId,
+      now,
+    });
+    if (workerStartResult) return workerStartResult;
+
     // 抓第 1 页(同步,以便返回 totalPages)
     const firstUrl = ensurePageIdParam(input.url, 1);
     let firstHtml: string;
@@ -492,6 +504,96 @@ export class VoiceTableService {
 
   // ============================ 内部 ============================
 
+  private async tryStartCrawlInWorker(args: {
+    crmKey: string;
+    strategy: VoiceTableStrategy;
+    mid: number;
+    baseUrl: string;
+    headers: Headers;
+    key: string;
+    taskId: string;
+    now: number;
+  }): Promise<CrawlStartResult | null> {
+    if (process.env.VOICE_TABLE_WORKER_ENABLED === 'false') return null;
+
+    if (this.activeMap.get(args.key) === true) {
+      return {
+        success: true,
+        module: args.strategy.module,
+        mid: args.mid,
+        taskId: args.taskId,
+        busy: true,
+        message: '表格 worker 正在运行',
+      };
+    }
+
+    const workerPath = this.resolveWorkerPath();
+    if (!workerPath) return null;
+
+    this.throttleMap.set(args.key, args.now);
+    this.activeMap.set(args.key, true);
+    try {
+      const result = await this.runVoiceTableWorker({
+        mode: 'start',
+        crmKey: args.crmKey,
+        module: args.strategy.module,
+        mid: args.mid,
+        baseUrl: args.baseUrl,
+        headers: args.headers,
+      });
+
+      if (!result.success) {
+        this.ws.broadcastVoiceTableProgress({
+          module: args.strategy.module,
+          mid: args.mid,
+          taskId: args.taskId,
+          page: result.highestCompletedPage || 0,
+          pagesToFetch: result.pagesToFetch ?? 0,
+          status: 'failed',
+          error: result.error,
+        });
+        return {
+          success: false,
+          module: args.strategy.module,
+          mid: args.mid,
+          taskId: args.taskId,
+          totalPages: result.totalPages,
+          pagesToFetch: result.pagesToFetch,
+          message: result.error || 'table worker failed',
+        };
+      }
+
+      this.ws.broadcastVoiceTableProgress({
+        module: args.strategy.module,
+        mid: args.mid,
+        taskId: args.taskId,
+        page: result.highestCompletedPage || 1,
+        pagesToFetch: result.pagesToFetch ?? 1,
+        status: 'completed',
+      });
+
+      return {
+        success: true,
+        module: args.strategy.module,
+        mid: args.mid,
+        taskId: args.taskId,
+        totalPages: result.totalPages,
+        pagesToFetch: result.pagesToFetch,
+      };
+    } catch (err: any) {
+      this.logger.error(`表格 worker 启动执行失败 ${args.key}: ${err.message}`);
+      return {
+        success: false,
+        module: args.strategy.module,
+        mid: args.mid,
+        taskId: args.taskId,
+        message: err.message,
+      };
+    } finally {
+      this.activeMap.delete(args.key);
+    }
+  }
+
   private async runRemainingPages(args: {
     strategy: VoiceTableStrategy;
     crmKey: string;
@@ -740,17 +842,9 @@ export class VoiceTableService {
   }): Promise<boolean> {
     if (process.env.VOICE_TABLE_WORKER_ENABLED === 'false') return false;
 
-    const workerPath =
-      process.env.VOICE_TABLE_WORKER_PATH ??
-      join(process.cwd(), 'dist', 'workers', 'voice-table-batch.worker.js');
-    if (!existsSync(workerPath)) {
-      this.logger.warn(
-        `表格 worker 文件不存在，回退主进程执行: ${workerPath}`,
-      );
-      return false;
-    }
-
+    if (!this.resolveWorkerPath()) return false;
     const payload = {
+      mode: 'batch',
       crmKey: args.crmKey,
       module: args.strategy.module,
       mid: args.mid,
@@ -773,14 +867,73 @@ export class VoiceTableService {
       )} heap=${this.formatHeapUsage()}`,
     );
 
-    const result = await new Promise<{
-      success: boolean;
-      highestCompletedPage: number;
-      anchorFound: boolean;
-      completedInitialDate: string | null;
-      failedPages: number;
-      error?: string;
-    }>((resolve, reject) => {
+    const result = await this.runVoiceTableWorker(payload);
+
+    if (args.runResult && result.anchorFound) {
+      args.runResult.anchorFound = true;
+    }
+
+    if (!result.success) {
+      this.logger.warn(
+        `表格 worker 执行失败 ${args.key}: ${result.error ?? 'unknown'}`,
+      );
+      this.ws.broadcastVoiceTableProgress({
+        module: args.strategy.module,
+        mid: args.mid,
+        taskId: args.taskId,
+        page: result.highestCompletedPage || args.initialLastCompletedPage,
+        pagesToFetch: args.pagesToFetch,
+        status: 'failed',
+        error: result.error,
+      });
+      return true;
+    }
+
+    this.logger.log(
+      `表格 worker 完成 ${args.key}: page=${result.highestCompletedPage}/${args.pagesToFetch} failed=${result.failedPages}`,
+    );
+    this.ws.broadcastVoiceTableProgress({
+      module: args.strategy.module,
+      mid: args.mid,
+      taskId: args.taskId,
+      page: result.highestCompletedPage,
+      pagesToFetch: args.pagesToFetch,
+      status: 'completed',
+    });
+    return true;
+  }
+
+  private resolveWorkerPath(): string | null {
+    const workerPath =
+      process.env.VOICE_TABLE_WORKER_PATH ??
+      join(process.cwd(), 'dist', 'workers', 'voice-table-batch.worker.js');
+    if (!existsSync(workerPath)) {
+      this.logger.warn(
+        `表格 worker 文件不存在，回退主进程执行: ${workerPath}`,
+      );
+      return null;
+    }
+    return workerPath;
+  }
+
+  private async runVoiceTableWorker(payload: Record<string, any>): Promise<{
+    success: boolean;
+    highestCompletedPage: number;
+    anchorFound: boolean;
+    completedInitialDate: string | null;
+    failedPages: number;
+    module?: VoiceModule;
+    mid?: number;
+    totalPages?: number;
+    pagesToFetch?: number;
+    error?: string;
+  }> {
+    const workerPath = this.resolveWorkerPath();
+    if (!workerPath) {
+      throw new Error('voice-table worker not found');
+    }
+
+    return new Promise((resolve, reject) => {
       const child = fork(workerPath, [], {
         env: {
           ...process.env,
@@ -820,39 +973,6 @@ export class VoiceTableService {
         }
       });
     });
-
-    if (args.runResult && result.anchorFound) {
-      args.runResult.anchorFound = true;
-    }
-
-    if (!result.success) {
-      this.logger.warn(
-        `表格 worker 执行失败 ${args.key}: ${result.error ?? 'unknown'}`,
-      );
-      this.ws.broadcastVoiceTableProgress({
-        module: args.strategy.module,
-        mid: args.mid,
-        taskId: args.taskId,
-        page: result.highestCompletedPage || args.initialLastCompletedPage,
-        pagesToFetch: args.pagesToFetch,
-        status: 'failed',
-        error: result.error,
-      });
-      return true;
-    }
-
-    this.logger.log(
-      `表格 worker 完成 ${args.key}: page=${result.highestCompletedPage}/${args.pagesToFetch} failed=${result.failedPages}`,
-    );
-    this.ws.broadcastVoiceTableProgress({
-      module: args.strategy.module,
-      mid: args.mid,
-      taskId: args.taskId,
-      page: result.highestCompletedPage,
-      pagesToFetch: args.pagesToFetch,
-      status: 'completed',
-    });
-    return true;
   }
 
   private async crawlPage(args: {

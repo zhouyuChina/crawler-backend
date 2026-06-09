@@ -22,6 +22,9 @@ const MAX_RETRIES = 2;
 const PAGE_DELAY_MS = 200;
 const CHECKPOINT_INTERVAL_PAGES = 50;
 const MAX_VOICE_TABLE_HTML_BYTES = 2 * 1024 * 1024;
+const MIN_DETAIL_PAGES_PER_RUN = 10;
+const RESUME_OVERLAP_PAGES = 2;
+const VOICE_TABLE_DAILY_MAX_PAGES = 100;
 
 type Headers = Record<string, string>;
 
@@ -36,15 +39,16 @@ interface WorkerPageRange {
 }
 
 interface WorkerPayload {
+  mode?: 'start' | 'batch';
   crmKey: string;
-  module: VoiceModule;
+  module?: VoiceModule;
   mid: number;
   baseUrl: string;
   headers: Headers;
-  pagesToFetch: number;
-  discoveredTotalPages: number;
-  pageRanges: WorkerPageRange[];
-  initialLastCompletedPage: number;
+  pagesToFetch?: number;
+  discoveredTotalPages?: number;
+  pageRanges?: WorkerPageRange[];
+  initialLastCompletedPage?: number;
 }
 
 interface WorkerResult {
@@ -54,6 +58,10 @@ interface WorkerResult {
   stoppedByBoundary: boolean;
   completedInitialDate: string | null;
   failedPages: number;
+  module?: VoiceModule;
+  mid?: number;
+  totalPages?: number;
+  pagesToFetch?: number;
   error?: string;
 }
 
@@ -63,17 +71,185 @@ async function main() {
 
   const payload = JSON.parse(payloadRaw) as WorkerPayload;
   const strategy = resolveStrategy(payload.baseUrl);
-  if (!strategy || strategy.module !== payload.module) {
+  if (!strategy || (payload.module && strategy.module !== payload.module)) {
     throw new Error(`unsupported worker url/module: ${payload.baseUrl}`);
   }
 
   const dataSource = await createDataSource().initialize();
   try {
-    const result = await runBatch(dataSource, strategy, payload);
+    const result =
+      payload.mode === 'start'
+        ? await runStartCrawl(dataSource, strategy, payload)
+        : await runBatch(dataSource, strategy, payload as Required<WorkerPayload>);
     sendResult(result);
   } finally {
     await dataSource.destroy();
   }
+}
+
+async function runStartCrawl(
+  dataSource: DataSource,
+  strategy: VoiceTableStrategy,
+  payload: WorkerPayload,
+): Promise<WorkerResult> {
+  const firstHtml = await fetchHtmlWithRetry(ensurePageIdParam(payload.baseUrl, 1), payload.headers);
+  const firstParsed = strategy.parse(firstHtml);
+  const totalPages = firstParsed.totalPages || 1;
+  const crawlState = await dataSource.getRepository(VoiceCrawlState).findOne({
+    where: { crmKey: payload.crmKey, module: strategy.module, mid: payload.mid },
+  });
+  const isIncomplete =
+    crawlState && crawlState.status !== 'completed' && crawlState.lastCompletedPage > 0;
+  const ivrBusinessDate =
+    strategy.module === 'voice_ivr'
+      ? getIvrBusinessDate(firstParsed.rows as ParsedRowVoiceIvr[])
+      : null;
+  const needsIvrDailyAnchor =
+    strategy.module === 'voice_ivr' &&
+    ivrBusinessDate != null &&
+    crawlState?.initialCompletedDate !== ivrBusinessDate;
+
+  let pagesToFetch: number;
+  let pageRanges: WorkerPageRange[];
+  if (needsIvrDailyAnchor) {
+    const tailAnchorKeys = await fetchIvrTailAnchorKeys(dataSource, strategy, payload, totalPages);
+    const dailyCap = Math.min(totalPages, VOICE_TABLE_DAILY_MAX_PAGES);
+    pagesToFetch = dailyCap;
+    pageRanges =
+      dailyCap >= 2
+        ? [
+            {
+              start: 2,
+              end: dailyCap,
+              label: '每日初始锚点',
+              updateCheckpoint: true,
+              stopOnAnchorKeys: Array.from(tailAnchorKeys),
+              initialCompletedDate: ivrBusinessDate,
+            },
+          ]
+        : [];
+  } else if (strategy.module === 'voice_ivr') {
+    pagesToFetch = Math.min(totalPages, VOICE_TABLE_DAILY_MAX_PAGES);
+    pageRanges =
+      pagesToFetch >= 2
+        ? [
+            {
+              start: 2,
+              end: pagesToFetch,
+              label: '增量查重',
+              updateCheckpoint: false,
+              stopOnDuplicatePage: true,
+            },
+          ]
+        : [];
+  } else if (isIncomplete) {
+    pagesToFetch = Math.max(crawlState.totalPages, totalPages);
+    pageRanges = buildResumeRanges({
+      lastCompletedPage: crawlState.lastCompletedPage,
+      previousTotalPages: crawlState.totalPages,
+      pagesToFetch,
+    });
+  } else {
+    const lastTotalPages = await getLastTotalPages(dataSource, payload.crmKey, strategy.module, payload.mid);
+    if (lastTotalPages == null || totalPages < lastTotalPages) {
+      pagesToFetch = totalPages;
+    } else {
+      pagesToFetch = Math.max(MIN_DETAIL_PAGES_PER_RUN, totalPages - lastTotalPages + 1);
+    }
+    pagesToFetch = Math.min(pagesToFetch, totalPages, VOICE_TABLE_DAILY_MAX_PAGES);
+    pageRanges =
+      pagesToFetch >= 2
+        ? [{ start: 2, end: pagesToFetch, label: '增量', updateCheckpoint: true }]
+        : [];
+  }
+
+  const insertedFirst = await persistRows(
+    dataSource,
+    strategy.module,
+    payload.crmKey,
+    payload.mid,
+    payload.baseUrl,
+    firstParsed.rows,
+  );
+
+  if (
+    strategy.module === 'voice_ivr' &&
+    !needsIvrDailyAnchor &&
+    firstParsed.rows.length > 0 &&
+    insertedFirst.length === 0
+  ) {
+    pageRanges = [];
+    pagesToFetch = 1;
+  }
+
+  await persistSummary(
+    dataSource,
+    strategy,
+    payload.crmKey,
+    payload.mid,
+    payload.baseUrl,
+    firstParsed.summary,
+    firstParsed.summaryMatched,
+    totalPages,
+    pagesToFetch,
+    new Date(),
+  );
+
+  await upsertCrawlState(dataSource, payload.crmKey, strategy.module, payload.mid, {
+    totalPages: isIncomplete && strategy.module !== 'voice_ivr' ? crawlState.totalPages : totalPages,
+    lastCompletedPage:
+      isIncomplete && strategy.module !== 'voice_ivr'
+        ? crawlState.lastCompletedPage
+        : Math.min(1, pagesToFetch),
+    status: 'running',
+  });
+
+  if (pageRanges.length === 0) {
+    await upsertCrawlState(dataSource, payload.crmKey, strategy.module, payload.mid, {
+      totalPages,
+      status: 'completed',
+      lastCompletedPage: pagesToFetch,
+      initialCompletedDate: needsIvrDailyAnchor ? ivrBusinessDate : crawlState?.initialCompletedDate,
+    });
+    return {
+      success: true,
+      highestCompletedPage: pagesToFetch,
+      anchorFound: false,
+      stoppedByBoundary: false,
+      completedInitialDate: null,
+      failedPages: 0,
+      module: strategy.module,
+      mid: payload.mid,
+      totalPages,
+      pagesToFetch,
+    };
+  }
+
+  const batchResult = await runBatch(dataSource, strategy, {
+    ...payload,
+    module: strategy.module,
+    pagesToFetch,
+    discoveredTotalPages: totalPages,
+    pageRanges,
+    initialLastCompletedPage:
+      isIncomplete && crawlState ? crawlState.lastCompletedPage : Math.min(1, pagesToFetch),
+  } as Required<WorkerPayload>);
+
+  if (needsIvrDailyAnchor && !batchResult.anchorFound && totalPages > VOICE_TABLE_DAILY_MAX_PAGES) {
+    await upsertCrawlState(dataSource, payload.crmKey, strategy.module, payload.mid, {
+      historyStatus: 'pending',
+      historyNextPage: pagesToFetch + 1,
+      historyTotalPagesRef: totalPages,
+    });
+  }
+
+  return {
+    ...batchResult,
+    module: strategy.module,
+    mid: payload.mid,
+    totalPages,
+    pagesToFetch,
+  };
 }
 
 async function runBatch(
@@ -81,13 +257,17 @@ async function runBatch(
   strategy: VoiceTableStrategy,
   payload: WorkerPayload,
 ): Promise<WorkerResult> {
+  if (!payload.module) throw new Error('batch payload module missing');
+  const module = payload.module;
+  const pageRanges = payload.pageRanges ?? [];
+  const discoveredTotalPages = payload.discoveredTotalPages ?? 1;
+  let highestCompletedPage = payload.initialLastCompletedPage ?? 0;
   const failedPages: number[] = [];
-  let highestCompletedPage = payload.initialLastCompletedPage;
   let anchorFound = false;
   let stoppedByBoundary = false;
   let completedInitialDate: string | null = null;
 
-  for (const range of payload.pageRanges) {
+  for (const range of pageRanges) {
     const anchorKeys = new Set(range.stopOnAnchorKeys ?? []);
     for (let page = range.start; page <= range.end; page++) {
       try {
@@ -96,7 +276,7 @@ async function runBatch(
         if (range.updateCheckpoint) {
           highestCompletedPage = Math.max(highestCompletedPage, page);
           if (page === range.end || page % CHECKPOINT_INTERVAL_PAGES === 0) {
-            await upsertCrawlState(dataSource, payload.crmKey, payload.module, payload.mid, {
+            await upsertCrawlState(dataSource, payload.crmKey, module, payload.mid, {
               lastCompletedPage: highestCompletedPage,
               status: 'running',
             });
@@ -117,7 +297,7 @@ async function runBatch(
       } catch (err: any) {
         const message = err?.message || String(err);
         if (/HTTP (401|403)/.test(message)) {
-          await upsertCrawlState(dataSource, payload.crmKey, payload.module, payload.mid, {
+          await upsertCrawlState(dataSource, payload.crmKey, module, payload.mid, {
             status: 'failed',
           });
           return {
@@ -137,14 +317,14 @@ async function runBatch(
     }
 
     if (stoppedByBoundary) break;
-    if (range.initialCompletedDate && range.end >= payload.discoveredTotalPages) {
+    if (range.initialCompletedDate && range.end >= discoveredTotalPages) {
       completedInitialDate = range.initialCompletedDate;
     }
   }
 
   if (failedPages.length > 0) {
-    await upsertCrawlState(dataSource, payload.crmKey, payload.module, payload.mid, {
-      totalPages: payload.discoveredTotalPages,
+    await upsertCrawlState(dataSource, payload.crmKey, module, payload.mid, {
+      totalPages: discoveredTotalPages,
       lastCompletedPage: highestCompletedPage,
       status: 'failed',
     });
@@ -159,8 +339,8 @@ async function runBatch(
     };
   }
 
-  await upsertCrawlState(dataSource, payload.crmKey, payload.module, payload.mid, {
-    totalPages: payload.discoveredTotalPages,
+  await upsertCrawlState(dataSource, payload.crmKey, module, payload.mid, {
+    totalPages: discoveredTotalPages,
     lastCompletedPage: highestCompletedPage,
     status: 'completed',
     ...(completedInitialDate ? { initialCompletedDate: completedInitialDate } : {}),
@@ -308,6 +488,192 @@ async function upsertCrawlState(
       initialCompletedDate: update.initialCompletedDate ?? null,
     });
   }
+}
+
+async function persistSummary(
+  dataSource: DataSource,
+  strategy: VoiceTableStrategy,
+  crmKey: string,
+  mid: number,
+  sourceUrl: string,
+  summary: any,
+  summaryMatched: boolean,
+  totalPages: number,
+  pagesToFetch: number,
+  capturedAt: Date,
+) {
+  if (!summaryMatched) return;
+
+  if (strategy.module === 'voice_ivr') {
+    const repo = dataSource.getRepository(VoiceIvrSummary);
+    const last = await repo.findOne({
+      where: { crmKey, mid },
+      order: { capturedAt: 'DESC' },
+    });
+    if (
+      last &&
+      last.totalRecords === summary.totalRecords &&
+      last.connectFail === summary.connectFail &&
+      last.busy === summary.busy &&
+      last.noAnswer === summary.noAnswer &&
+      last.connected === summary.connected &&
+      last.totalPages === totalPages
+    ) {
+      await repo.update(last.id, { capturedAt });
+      return;
+    }
+    await repo.save({
+      id: uuidv4(),
+      crmKey,
+      mid,
+      totalRecords: summary.totalRecords,
+      connectFail: summary.connectFail,
+      busy: summary.busy,
+      noAnswer: summary.noAnswer,
+      connected: summary.connected,
+      totalPages,
+      sourceUrl,
+      capturedAt,
+    });
+    return;
+  }
+
+  const repo = dataSource.getRepository(VoiceOpSummary);
+  const last = await repo.findOne({
+    where: { crmKey, mid },
+    order: { capturedAt: 'DESC' },
+  });
+  const connectRate = Number(summary.connectRate || 0).toFixed(2);
+  const callbackRate = Number(summary.callbackRate || 0).toFixed(2);
+  if (
+    last &&
+    last.totalRecords === summary.totalRecords &&
+    last.initCount === summary.initCount &&
+    last.ringing === summary.ringing &&
+    last.connected === summary.connected &&
+    last.agentCount === summary.agentCount &&
+    String(last.connectRate) === connectRate &&
+    String(last.callbackRate) === callbackRate &&
+    last.totalPages === totalPages
+  ) {
+    await repo.update(last.id, { capturedAt });
+    return;
+  }
+  await repo.save({
+    id: uuidv4(),
+    crmKey,
+    mid,
+    totalRecords: summary.totalRecords,
+    initCount: summary.initCount,
+    ringing: summary.ringing,
+    connected: summary.connected,
+    agentCount: summary.agentCount,
+    connectRate,
+    callbackRate,
+    totalPages,
+    sourceUrl,
+    capturedAt,
+  });
+}
+
+async function getLastTotalPages(
+  dataSource: DataSource,
+  crmKey: string,
+  module: VoiceModule,
+  mid: number,
+): Promise<number | null> {
+  const repo =
+    module === 'voice_ivr'
+      ? dataSource.getRepository(VoiceIvrSummary)
+      : dataSource.getRepository(VoiceOpSummary);
+  const last = await repo
+    .createQueryBuilder('s')
+    .where('s."crmKey" = :crmKey', { crmKey })
+    .andWhere('s.mid = :mid', { mid })
+    .andWhere('(s."totalRecords" > 0 OR s."totalPages" > 1)')
+    .orderBy('s."capturedAt"', 'DESC')
+    .getOne();
+  return last ? last.totalPages : null;
+}
+
+async function fetchIvrTailAnchorKeys(
+  dataSource: DataSource,
+  strategy: VoiceTableStrategy,
+  payload: WorkerPayload,
+  totalPages: number,
+): Promise<Set<string>> {
+  const keys = new Set<string>();
+  if (totalPages <= 1) return keys;
+  const start = Math.max(2, totalPages - 2 + 1);
+  for (let page = start; page <= totalPages; page++) {
+    const html = await fetchHtmlWithRetry(
+      ensurePageIdParam(payload.baseUrl, page),
+      payload.headers,
+    );
+    const parsed = strategy.parse(html);
+    for (const row of parsed.rows as ParsedRowVoiceIvr[]) {
+      if (!row.recordId || !row.callDate) continue;
+      keys.add(`${payload.crmKey}|${payload.mid}|${formatDateKey(row.callDate)}|${row.recordId}`);
+    }
+  }
+  return keys;
+}
+
+function buildResumeRanges(args: {
+  lastCompletedPage: number;
+  previousTotalPages: number;
+  pagesToFetch: number;
+}): WorkerPageRange[] {
+  const { lastCompletedPage, previousTotalPages, pagesToFetch } = args;
+  const deltaPages = Math.max(0, pagesToFetch - previousTotalPages);
+  const ranges: WorkerPageRange[] = [];
+
+  if (deltaPages > 0) {
+    const frontEnd = Math.min(pagesToFetch, deltaPages + RESUME_OVERLAP_PAGES);
+    if (frontEnd >= 2) {
+      ranges.push({
+        start: 2,
+        end: frontEnd,
+        label: '补扫最新区',
+        updateCheckpoint: false,
+      });
+    }
+  }
+
+  const resumeStart = Math.max(2, lastCompletedPage - RESUME_OVERLAP_PAGES + 1);
+  if (resumeStart <= pagesToFetch) {
+    ranges.push({
+      start: resumeStart,
+      end: pagesToFetch,
+      label: '断点续抓',
+      updateCheckpoint: true,
+    });
+  }
+
+  return mergePageRanges(ranges);
+}
+
+function mergePageRanges(ranges: WorkerPageRange[]): WorkerPageRange[] {
+  const sorted = [...ranges].sort((a, b) => a.start - b.start);
+  const merged: WorkerPageRange[] = [];
+  for (const range of sorted) {
+    const last = merged[merged.length - 1];
+    if (!last || range.start > last.end + 1) {
+      merged.push({ ...range });
+      continue;
+    }
+    last.end = Math.max(last.end, range.end);
+    last.updateCheckpoint = last.updateCheckpoint || range.updateCheckpoint;
+    last.label = last.label === range.label ? last.label : `${last.label}+${range.label}`;
+  }
+  return merged;
+}
+
+function getIvrBusinessDate(rows: ParsedRowVoiceIvr[]): string | null {
+  for (const row of rows) {
+    if (row.callDate) return formatDateKey(row.callDate);
+  }
+  return null;
 }
 
 async function fetchHtmlWithRetry(url: string, headers: Headers): Promise<string> {
