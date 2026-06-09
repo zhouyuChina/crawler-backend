@@ -15,6 +15,7 @@ import { MonitorModule } from './modules/monitor/monitor.module';
 import { CallRecordModule } from './modules/call-record/call-record.module';
 import { VoiceTableModule } from './modules/voice-table/voice-table.module';
 import { CrawlProfileModule } from './modules/crawl-profile/crawl-profile.module';
+import { DataRetentionModule } from './modules/data-retention/data-retention.module';
 import { LoggerMiddleware } from './common/middleware/logger.middleware';
 
 const envFilePath = process.env.NODE_ENV
@@ -54,6 +55,7 @@ const envFilePath = process.env.NODE_ENV
     CallRecordModule,
     VoiceTableModule,
     CrawlProfileModule,
+    DataRetentionModule,
   ],
   controllers: [AppController],
   providers: [AppService],

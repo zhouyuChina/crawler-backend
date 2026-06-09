@@ -3,6 +3,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as http from 'http';
 import * as https from 'https';
+import { fork } from 'child_process';
+import { existsSync } from 'fs';
+import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
 import { WebsocketGateway } from '../websocket/websocket.gateway';
@@ -526,6 +529,9 @@ export class VoiceTableService {
     let completedInitialDate: string | null = null;
     let unresolvedFailedPages = 0;
 
+    const workerHandled = await this.tryRunRemainingPagesInWorker(args);
+    if (workerHandled) return;
+
     for (const range of pageRanges) {
       for (let page = range.start; page <= range.end; page++) {
         if (this.getHeapUsageRatio() >= MEMORY_PAUSE_HEAP_RATIO) {
@@ -716,6 +722,137 @@ export class VoiceTableService {
       pagesToFetch,
       status: 'completed',
     });
+  }
+
+  private async tryRunRemainingPagesInWorker(args: {
+    strategy: VoiceTableStrategy;
+    crmKey: string;
+    mid: number;
+    baseUrl: string;
+    headers: Headers;
+    pagesToFetch: number;
+    discoveredTotalPages: number;
+    pageRanges: PageRange[];
+    initialLastCompletedPage: number;
+    taskId: string;
+    key: string;
+    runResult?: { anchorFound: boolean };
+  }): Promise<boolean> {
+    if (process.env.VOICE_TABLE_WORKER_ENABLED === 'false') return false;
+
+    const workerPath =
+      process.env.VOICE_TABLE_WORKER_PATH ??
+      join(process.cwd(), 'dist', 'workers', 'voice-table-batch.worker.js');
+    if (!existsSync(workerPath)) {
+      this.logger.warn(
+        `表格 worker 文件不存在，回退主进程执行: ${workerPath}`,
+      );
+      return false;
+    }
+
+    const payload = {
+      crmKey: args.crmKey,
+      module: args.strategy.module,
+      mid: args.mid,
+      baseUrl: args.baseUrl,
+      headers: args.headers,
+      pagesToFetch: args.pagesToFetch,
+      discoveredTotalPages: args.discoveredTotalPages,
+      pageRanges: args.pageRanges.map((range) => ({
+        ...range,
+        stopOnAnchorKeys: range.stopOnAnchorKeys
+          ? Array.from(range.stopOnAnchorKeys)
+          : undefined,
+      })),
+      initialLastCompletedPage: args.initialLastCompletedPage,
+    };
+
+    this.logger.log(
+      `启动表格 worker ${args.key}: ranges=${this.formatPageRanges(
+        args.pageRanges,
+      )} heap=${this.formatHeapUsage()}`,
+    );
+
+    const result = await new Promise<{
+      success: boolean;
+      highestCompletedPage: number;
+      anchorFound: boolean;
+      completedInitialDate: string | null;
+      failedPages: number;
+      error?: string;
+    }>((resolve, reject) => {
+      const child = fork(workerPath, [], {
+        env: {
+          ...process.env,
+          VOICE_TABLE_WORKER_PAYLOAD: JSON.stringify(payload),
+        },
+        execArgv: ['--max-old-space-size=512'],
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      });
+
+      let settled = false;
+      child.stdout?.on('data', (chunk) => {
+        this.logger.log(`[voice-table-worker] ${String(chunk).trim()}`);
+      });
+      child.stderr?.on('data', (chunk) => {
+        this.logger.warn(`[voice-table-worker] ${String(chunk).trim()}`);
+      });
+      child.on('message', (message) => {
+        settled = true;
+        resolve(message as any);
+      });
+      child.on('error', (err) => {
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+      });
+      child.on('exit', (code, signal) => {
+        if (!settled) {
+          settled = true;
+          reject(
+            new Error(
+              `voice-table worker exited code=${code ?? 'null'} signal=${
+                signal ?? 'null'
+              }`,
+            ),
+          );
+        }
+      });
+    });
+
+    if (args.runResult && result.anchorFound) {
+      args.runResult.anchorFound = true;
+    }
+
+    if (!result.success) {
+      this.logger.warn(
+        `表格 worker 执行失败 ${args.key}: ${result.error ?? 'unknown'}`,
+      );
+      this.ws.broadcastVoiceTableProgress({
+        module: args.strategy.module,
+        mid: args.mid,
+        taskId: args.taskId,
+        page: result.highestCompletedPage || args.initialLastCompletedPage,
+        pagesToFetch: args.pagesToFetch,
+        status: 'failed',
+        error: result.error,
+      });
+      return true;
+    }
+
+    this.logger.log(
+      `表格 worker 完成 ${args.key}: page=${result.highestCompletedPage}/${args.pagesToFetch} failed=${result.failedPages}`,
+    );
+    this.ws.broadcastVoiceTableProgress({
+      module: args.strategy.module,
+      mid: args.mid,
+      taskId: args.taskId,
+      page: result.highestCompletedPage,
+      pagesToFetch: args.pagesToFetch,
+      status: 'completed',
+    });
+    return true;
   }
 
   private async crawlPage(args: {
