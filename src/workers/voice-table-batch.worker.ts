@@ -79,12 +79,18 @@ async function main() {
 
   const dataSource = await createDataSource().initialize();
   try {
+    logWorker(
+      `start mode=${payload.mode ?? 'batch'} module=${strategy.module} mid=${payload.mid} baseUrl=${payload.baseUrl}`,
+    );
     const result =
       payload.mode === 'start'
         ? await runStartCrawl(dataSource, strategy, payload)
         : payload.mode === 'history'
           ? await runHistoryBatch(dataSource, strategy, payload)
         : await runBatch(dataSource, strategy, payload as Required<WorkerPayload>);
+    logWorker(
+      `done mode=${payload.mode ?? 'batch'} success=${result.success} page=${result.highestCompletedPage}/${result.totalPages ?? result.pagesToFetch ?? '-'} hasMoreHistory=${Boolean(result.hasMoreHistory)}`,
+    );
     sendResult(result);
   } finally {
     await dataSource.destroy();
@@ -132,6 +138,9 @@ async function runHistoryBatch(
   const firstHtml = await fetchHtmlWithRetry(ensurePageIdParam(payload.baseUrl, 1), payload.headers);
   const firstParsed = strategy.parse(firstHtml);
   const currentTotalPages = firstParsed.totalPages || 1;
+  logWorker(
+    `history first-page module=${strategy.module} mid=${payload.mid} html=${firstHtml.length} totalPages=${currentTotalPages}`,
+  );
   const ivrBusinessDate = getIvrBusinessDate(firstParsed.rows as ParsedRowVoiceIvr[]);
   const drift = state.historyTotalPagesRef
     ? Math.max(0, currentTotalPages - state.historyTotalPagesRef)
@@ -170,6 +179,9 @@ async function runHistoryBatch(
     strategy,
     payload,
     currentTotalPages,
+  );
+  logWorker(
+    `history batch range module=${strategy.module} mid=${payload.mid} page=${adjustedStart}-${batchEnd}/${currentTotalPages} anchors=${tailAnchorKeys.size}`,
   );
 
   await upsertCrawlState(dataSource, payload.crmKey, strategy.module, payload.mid, {
@@ -243,6 +255,9 @@ async function runStartCrawl(
   const firstHtml = await fetchHtmlWithRetry(ensurePageIdParam(payload.baseUrl, 1), payload.headers);
   const firstParsed = strategy.parse(firstHtml);
   const totalPages = firstParsed.totalPages || 1;
+  logWorker(
+    `start first-page module=${strategy.module} mid=${payload.mid} html=${firstHtml.length} rows=${firstParsed.rows.length} totalPages=${totalPages}`,
+  );
   const crawlState = await dataSource.getRepository(VoiceCrawlState).findOne({
     where: { crmKey: payload.crmKey, module: strategy.module, mid: payload.mid },
   });
@@ -276,6 +291,9 @@ async function runStartCrawl(
             },
           ]
         : [];
+    logWorker(
+      `start daily-anchor module=${strategy.module} mid=${payload.mid} date=${ivrBusinessDate} range=2-${dailyCap}/${totalPages} anchors=${tailAnchorKeys.size}`,
+    );
   } else if (strategy.module === 'voice_ivr') {
     pagesToFetch = Math.min(totalPages, VOICE_TABLE_DAILY_MAX_PAGES);
     pageRanges =
@@ -318,6 +336,9 @@ async function runStartCrawl(
     payload.mid,
     payload.baseUrl,
     firstParsed.rows,
+  );
+  logWorker(
+    `start first-page persisted module=${strategy.module} mid=${payload.mid} inserted=${insertedFirst.length} ranges=${pageRanges.map((r) => `${r.label}:${r.start}-${r.end}`).join(',') || 'none'}`,
   );
 
   if (
@@ -416,6 +437,9 @@ async function runBatch(
   let completedInitialDate: string | null = null;
 
   for (const range of pageRanges) {
+    logWorker(
+      `batch range begin module=${module} mid=${payload.mid} label=${range.label} page=${range.start}-${range.end}`,
+    );
     const anchorKeys = new Set(range.stopOnAnchorKeys ?? []);
     for (let page = range.start; page <= range.end; page++) {
       try {
@@ -431,15 +455,27 @@ async function runBatch(
           }
         }
 
+        if (page === range.start || page === range.end || page % 10 === 0) {
+          logWorker(
+            `batch progress module=${module} mid=${payload.mid} label=${range.label} page=${page}/${range.end} inserted=${outcome.insertedCount}`,
+          );
+        }
+
         if (range.stopOnAnchorKeys && outcome.containsAnchor) {
           anchorFound = true;
           stoppedByBoundary = true;
           completedInitialDate = range.initialCompletedDate ?? null;
+          logWorker(
+            `batch anchor-hit module=${module} mid=${payload.mid} label=${range.label} page=${page}`,
+          );
           break;
         }
 
         if (range.stopOnDuplicatePage && outcome.allRowsDuplicate) {
           stoppedByBoundary = true;
+          logWorker(
+            `batch duplicate-stop module=${module} mid=${payload.mid} label=${range.label} page=${page}`,
+          );
           break;
         }
       } catch (err: any) {
@@ -459,6 +495,9 @@ async function runBatch(
           };
         }
         failedPages.push(page);
+        logWorker(
+          `batch page-failed module=${module} mid=${payload.mid} page=${page} error=${message}`,
+        );
       }
 
       if (page < range.end) await sleep(PAGE_DELAY_MS);
@@ -502,6 +541,10 @@ async function runBatch(
     completedInitialDate,
     failedPages: 0,
   };
+}
+
+function logWorker(message: string) {
+  console.log(message);
 }
 
 async function crawlPage(

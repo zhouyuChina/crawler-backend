@@ -533,6 +533,7 @@ export class VoiceTableService {
     this.throttleMap.set(args.key, args.now);
     this.activeMap.set(args.key, true);
     try {
+      this.logger.log(`启动表格 start worker ${args.key}`);
       const result = await this.runVoiceTableWorker({
         mode: 'start',
         crmKey: args.crmKey,
