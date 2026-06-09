@@ -36,6 +36,8 @@ import {
 const THROTTLE_MS = 5 * 60 * 1000;
 /** 翻页间隔，避免对 CRM 请求过于密集 */
 const PAGE_DELAY_MS = 200;
+/** 表格翻页请求最大并发数（worker 不可用时的主进程兜底路径也使用） */
+const TABLE_PAGE_CONCURRENCY = 3;
 /** 单页抓取失败后的最大重试次数（实际最多尝试 MAX_RETRIES + 1 次） */
 const MAX_RETRIES = 2;
 /** 单页 HTTP 请求超时（毫秒） */
@@ -50,7 +52,7 @@ const PROGRESS_LOG_INTERVAL_PAGES = 100;
 const IVR_TAIL_ANCHOR_PAGES = 2;
 
 /** 单次日常明细扫描最多处理页数；超出部分交由历史补全任务分批续跑，防止单个长循环 OOM */
-const VOICE_TABLE_DAILY_MAX_PAGES = 100;
+const VOICE_TABLE_DAILY_MAX_PAGES = 10;
 /** 历史补全每批抓取页数 */
 const HISTORY_BATCH_SIZE = 50;
 /** checkpoint 写库间隔页数，降低高频 DB 往返开销 */
@@ -652,7 +654,7 @@ export class VoiceTableService {
     if (workerHandled) return;
 
     for (const range of pageRanges) {
-      for (let page = range.start; page <= range.end; page++) {
+      for (let page = range.start; page <= range.end && !stoppedByBoundary;) {
         if (this.getHeapUsageRatio() >= MEMORY_PAUSE_HEAP_RATIO) {
           pausedByMemory = true;
           this.logger.warn(
@@ -667,24 +669,86 @@ export class VoiceTableService {
         }
 
         const bulkMode = this.isBulkPageRange(strategy.module, range);
-        try {
-          const outcome = await this.crawlPage({
-            strategy,
-            crmKey,
-            mid,
-            baseUrl,
-            headers,
-            page,
-            pagesToFetch,
-            taskId,
-            anchorKeys: range.stopOnAnchorKeys,
-            isHistoryMode: bulkMode,
-          });
+        const pages: number[] = [];
+        while (page <= range.end && pages.length < TABLE_PAGE_CONCURRENCY) {
+          pages.push(page);
+          page++;
+        }
+
+        const results = await Promise.all(
+          pages.map(async (currentPage) => {
+            try {
+              const outcome = await this.crawlPage({
+                strategy,
+                crmKey,
+                mid,
+                baseUrl,
+                headers,
+                page: currentPage,
+                pagesToFetch,
+                taskId,
+                anchorKeys: range.stopOnAnchorKeys,
+                isHistoryMode: bulkMode,
+              });
+              return { page: currentPage, outcome };
+            } catch (error) {
+              return { page: currentPage, error };
+            }
+          }),
+        );
+
+        results.sort((a, b) => a.page - b.page);
+
+        for (const result of results) {
+          if ('error' in result) {
+            const message =
+              result.error instanceof Error
+                ? result.error.message
+                : String(result.error);
+
+            // 401/403 = Cookie 已失效，立刻中止，不继续也不补抓
+            if (this.isAuthError(message)) {
+              this.logger.warn(
+                `Cookie 失效（${message}），中止后续抓取 ${key}，等待重新登录`,
+              );
+              this.ws.broadcastVoiceTableProgress({
+                module: strategy.module,
+                mid,
+                taskId,
+                page: result.page,
+                pagesToFetch,
+                status: 'failed',
+                error: `Cookie 失效，已中止: ${message}`,
+              });
+              await this.upsertCrawlState(crmKey, strategy.module, mid, {
+                status: 'failed',
+              });
+              authAborted = true;
+              break;
+            }
+
+            failedPages.push({ page: result.page, error: message });
+            this.logger.warn(
+              `抓取 page=${result.page} 失败, 稍后重试 ${key}: ${message}`,
+            );
+            this.ws.broadcastVoiceTableProgress({
+              module: strategy.module,
+              mid,
+              taskId,
+              page: result.page,
+              pagesToFetch,
+              status: 'failed',
+              error: `${message}; queued for retry`,
+            });
+            continue;
+          }
+
+          const { page: completedPage, outcome } = result;
           if (range.updateCheckpoint) {
-            highestCompletedPage = Math.max(highestCompletedPage, page);
+            highestCompletedPage = Math.max(highestCompletedPage, completedPage);
             // 每 CHECKPOINT_INTERVAL_PAGES 页或到达 range 末尾时才写库，减少 DB 压力
-            const isRangeEnd = page === range.end;
-            if (isRangeEnd || page % CHECKPOINT_INTERVAL_PAGES === 0) {
+            const isRangeEnd = completedPage === range.end;
+            if (isRangeEnd || completedPage % CHECKPOINT_INTERVAL_PAGES === 0) {
               await this.upsertCrawlState(crmKey, strategy.module, mid, {
                 lastCompletedPage: highestCompletedPage,
                 status: 'running',
@@ -693,13 +757,13 @@ export class VoiceTableService {
           }
           if (
             this.shouldLogProgress(
-              page,
+              completedPage,
               range.end,
               bulkMode ? 0 : outcome.insertedCount,
             )
           ) {
             this.logger.log(
-              `明细进度 ${key}: ${range.label} page=${page}/${pagesToFetch} inserted=${outcome.insertedCount}`,
+              `明细进度 ${key}: ${range.label} page=${completedPage}/${pagesToFetch} inserted=${outcome.insertedCount}`,
             );
           }
           if (range.stopOnAnchorKeys && outcome.containsAnchor) {
@@ -707,57 +771,20 @@ export class VoiceTableService {
             completedInitialDate = range.initialCompletedDate ?? null;
             if (runResult) runResult.anchorFound = true;
             this.logger.log(
-              `IVR 命中尾页锚点 ${key}: page=${page}/${pagesToFetch}, 每日初始完成`,
+              `IVR 命中尾页锚点 ${key}: page=${completedPage}/${pagesToFetch}, 每日初始完成`,
             );
             break;
           }
           if (range.stopOnDuplicatePage && outcome.allRowsDuplicate) {
             stoppedByBoundary = true;
             this.logger.log(
-              `IVR 命中整页重复 ${key}: page=${page}/${pagesToFetch}, 增量完成`,
+              `IVR 命中整页重复 ${key}: page=${completedPage}/${pagesToFetch}, 增量完成`,
             );
             break;
           }
-        } catch (err: any) {
-          const message = err.message || String(err);
-
-          // 401/403 = Cookie 已失效，立刻中止，不继续也不补抓
-          if (this.isAuthError(message)) {
-            this.logger.warn(
-              `Cookie 失效（${message}），中止后续抓取 ${key}，等待重新登录`,
-            );
-            this.ws.broadcastVoiceTableProgress({
-              module: strategy.module,
-              mid,
-              taskId,
-              page,
-              pagesToFetch,
-              status: 'failed',
-              error: `Cookie 失效，已中止: ${message}`,
-            });
-            await this.upsertCrawlState(crmKey, strategy.module, mid, {
-              status: 'failed',
-            });
-            authAborted = true;
-            break;
-          }
-
-          failedPages.push({ page, error: message });
-          this.logger.warn(
-            `抓取 page=${page} 失败, 稍后重试 ${key}: ${message}`,
-          );
-          this.ws.broadcastVoiceTableProgress({
-            module: strategy.module,
-            mid,
-            taskId,
-            page,
-            pagesToFetch,
-            status: 'failed',
-            error: `${message}; queued for retry`,
-          });
         }
 
-        if (page < range.end) {
+        if (page <= range.end && !authAborted && !stoppedByBoundary) {
           await sleep(PAGE_DELAY_MS);
         }
       }

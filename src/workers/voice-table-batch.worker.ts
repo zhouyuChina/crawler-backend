@@ -23,6 +23,8 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RETRIES = 2;
 /** 翻页间隔，避免对 CRM 请求过于密集 */
 const PAGE_DELAY_MS = 50;
+/** 表格翻页请求最大并发数 */
+const TABLE_PAGE_CONCURRENCY = 3;
 /** checkpoint 写库间隔页数，降低高频 DB 往返开销 */
 const CHECKPOINT_INTERVAL_PAGES = 50;
 /** 单页 HTML 响应体大小上限（2MB），超出则拒绝 */
@@ -32,7 +34,7 @@ const MIN_DETAIL_PAGES_PER_RUN = 10;
 /** 断点续抓时往回重叠的页数，防止页码漂移或末页半完成导致漏数据 */
 const RESUME_OVERLAP_PAGES = 2;
 /** 单次日常明细扫描最多处理页数；超出部分交由历史补全任务分批续跑 */
-const VOICE_TABLE_DAILY_MAX_PAGES = 100;
+const VOICE_TABLE_DAILY_MAX_PAGES = 10;
 /** 历史补全每批抓取页数 */
 const HISTORY_BATCH_SIZE = 50;
 
@@ -129,7 +131,7 @@ async function runHistoryBatch(
   const state = await dataSource.getRepository(VoiceCrawlState).findOne({
     where: { crmKey: payload.crmKey, module: strategy.module, mid: payload.mid },
   });
-  if (!state || state.historyStatus !== 'pending') {
+  if (!state || !['pending', 'running'].includes(state.historyStatus ?? '')) {
     return {
       success: true,
       highestCompletedPage: 0,
@@ -270,6 +272,8 @@ async function runStartCrawl(
   const crawlState = await dataSource.getRepository(VoiceCrawlState).findOne({
     where: { crmKey: payload.crmKey, module: strategy.module, mid: payload.mid },
   });
+  const hasPendingHistory =
+    crawlState?.historyStatus === 'pending' || crawlState?.historyStatus === 'running';
   const isIncomplete =
     crawlState && crawlState.status !== 'completed' && crawlState.lastCompletedPage > 0;
   const ivrBusinessDate =
@@ -414,11 +418,15 @@ async function runStartCrawl(
   } as Required<WorkerPayload>);
 
   if (needsIvrDailyAnchor && !batchResult.anchorFound && totalPages > VOICE_TABLE_DAILY_MAX_PAGES) {
-    await upsertCrawlState(dataSource, payload.crmKey, strategy.module, payload.mid, {
+    const historyUpdate: Partial<VoiceCrawlState> = {
       historyStatus: 'pending',
-      historyNextPage: pagesToFetch + 1,
-      historyTotalPagesRef: totalPages,
-    });
+    };
+    // 重启恢复时保留已有历史游标，避免把 3051 之类的断点重置成 dailyCap + 1。
+    if (!hasPendingHistory) {
+      historyUpdate.historyNextPage = pagesToFetch + 1;
+      historyUpdate.historyTotalPagesRef = totalPages;
+    }
+    await upsertCrawlState(dataSource, payload.crmKey, strategy.module, payload.mid, historyUpdate);
   }
 
   return {
@@ -450,14 +458,61 @@ async function runBatch(
       `batch range begin module=${module} mid=${payload.mid} label=${range.label} page=${range.start}-${range.end}`,
     );
     const anchorKeys = new Set(range.stopOnAnchorKeys ?? []);
-    for (let page = range.start; page <= range.end; page++) {
-      try {
-        const outcome = await crawlPage(dataSource, strategy, payload, page, anchorKeys);
+    for (let page = range.start; page <= range.end && !stoppedByBoundary;) {
+      const pages: number[] = [];
+      while (page <= range.end && pages.length < TABLE_PAGE_CONCURRENCY) {
+        pages.push(page);
+        page++;
+      }
 
-        highestCompletedPage = Math.max(highestCompletedPage, page);
+      const results = await Promise.all(
+        pages.map(async (currentPage) => {
+          try {
+            const outcome = await crawlPage(
+              dataSource,
+              strategy,
+              payload,
+              currentPage,
+              anchorKeys,
+            );
+            return { page: currentPage, outcome };
+          } catch (error) {
+            return { page: currentPage, error };
+          }
+        }),
+      );
+
+      results.sort((a, b) => a.page - b.page);
+
+      for (const result of results) {
+        if ('error' in result) {
+          const message = result.error?.message || String(result.error);
+          if (/HTTP (401|403)/.test(message)) {
+            await upsertCrawlState(dataSource, payload.crmKey, module, payload.mid, {
+              status: 'failed',
+            });
+            return {
+              success: false,
+              highestCompletedPage,
+              anchorFound,
+              stoppedByBoundary,
+              completedInitialDate,
+              failedPages: failedPages.length,
+              error: message,
+            };
+          }
+          failedPages.push(result.page);
+          logWorker(
+            `batch page-failed module=${module} mid=${payload.mid} page=${result.page} error=${message}`,
+          );
+          continue;
+        }
+
+        const { page: completedPage, outcome } = result;
+        highestCompletedPage = Math.max(highestCompletedPage, completedPage);
 
         if (range.updateCheckpoint) {
-          if (page === range.end || page % CHECKPOINT_INTERVAL_PAGES === 0) {
+          if (completedPage === range.end || completedPage % CHECKPOINT_INTERVAL_PAGES === 0) {
             await upsertCrawlState(dataSource, payload.crmKey, module, payload.mid, {
               lastCompletedPage: highestCompletedPage,
               status: 'running',
@@ -465,9 +520,9 @@ async function runBatch(
           }
         }
 
-        if (page === range.start || page === range.end || page % 10 === 0) {
+        if (completedPage === range.start || completedPage === range.end || completedPage % 10 === 0) {
           logWorker(
-            `batch progress module=${module} mid=${payload.mid} label=${range.label} page=${page}/${range.end} inserted=${outcome.insertedCount}`,
+            `batch progress module=${module} mid=${payload.mid} label=${range.label} page=${completedPage}/${range.end} inserted=${outcome.insertedCount}`,
           );
         }
 
@@ -476,7 +531,7 @@ async function runBatch(
           stoppedByBoundary = true;
           completedInitialDate = range.initialCompletedDate ?? null;
           logWorker(
-            `batch anchor-hit module=${module} mid=${payload.mid} label=${range.label} page=${page}`,
+            `batch anchor-hit module=${module} mid=${payload.mid} label=${range.label} page=${completedPage}`,
           );
           break;
         }
@@ -484,33 +539,13 @@ async function runBatch(
         if (range.stopOnDuplicatePage && outcome.allRowsDuplicate) {
           stoppedByBoundary = true;
           logWorker(
-            `batch duplicate-stop module=${module} mid=${payload.mid} label=${range.label} page=${page}`,
+            `batch duplicate-stop module=${module} mid=${payload.mid} label=${range.label} page=${completedPage}`,
           );
           break;
         }
-      } catch (err: any) {
-        const message = err?.message || String(err);
-        if (/HTTP (401|403)/.test(message)) {
-          await upsertCrawlState(dataSource, payload.crmKey, module, payload.mid, {
-            status: 'failed',
-          });
-          return {
-            success: false,
-            highestCompletedPage,
-            anchorFound,
-            stoppedByBoundary,
-            completedInitialDate,
-            failedPages: failedPages.length,
-            error: message,
-          };
-        }
-        failedPages.push(page);
-        logWorker(
-          `batch page-failed module=${module} mid=${payload.mid} page=${page} error=${message}`,
-        );
       }
 
-      if (page < range.end) await sleep(PAGE_DELAY_MS);
+      if (page <= range.end && !stoppedByBoundary) await sleep(PAGE_DELAY_MS);
     }
 
     if (stoppedByBoundary) break;
