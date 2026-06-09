@@ -50,6 +50,7 @@ const CHECKPOINT_INTERVAL_PAGES = 50;
 const MEMORY_PAUSE_HEAP_RATIO = 0.7;
 const MEMORY_DANGER_HEAP_RATIO = 0.85;
 const MAX_VOICE_TABLE_HTML_BYTES = 2 * 1024 * 1024;
+const DEFAULT_WORKER_TIMEOUT_MS = 5 * 60 * 1000;
 
 type Headers = Record<string, string>;
 
@@ -1012,6 +1013,7 @@ export class VoiceTableService {
     }
 
     return new Promise((resolve, reject) => {
+      const timeoutMs = this.getWorkerTimeoutMs();
       const child = fork(workerPath, [], {
         env: {
           ...process.env,
@@ -1022,6 +1024,19 @@ export class VoiceTableService {
       });
 
       let settled = false;
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        child.kill('SIGKILL');
+        reject(
+          new Error(
+            `voice-table worker timeout after ${timeoutMs}ms mode=${payload.mode ?? 'batch'} module=${payload.module ?? 'unknown'} mid=${payload.mid ?? 'unknown'}`,
+          ),
+        );
+      }, timeoutMs);
+      timeout.unref();
+
+      const cleanup = () => clearTimeout(timeout);
       child.stdout?.on('data', (chunk) => {
         this.logger.log(`[voice-table-worker] ${String(chunk).trim()}`);
       });
@@ -1030,17 +1045,20 @@ export class VoiceTableService {
       });
       child.on('message', (message) => {
         settled = true;
+        cleanup();
         resolve(message as any);
       });
       child.on('error', (err) => {
         if (!settled) {
           settled = true;
+          cleanup();
           reject(err);
         }
       });
       child.on('exit', (code, signal) => {
         if (!settled) {
           settled = true;
+          cleanup();
           reject(
             new Error(
               `voice-table worker exited code=${code ?? 'null'} signal=${
@@ -1051,6 +1069,15 @@ export class VoiceTableService {
         }
       });
     });
+  }
+
+  private getWorkerTimeoutMs(): number {
+    const raw = process.env.VOICE_TABLE_WORKER_TIMEOUT_MS;
+    if (!raw) return DEFAULT_WORKER_TIMEOUT_MS;
+    const parsed = parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed > 0
+      ? parsed
+      : DEFAULT_WORKER_TIMEOUT_MS;
   }
 
   private async crawlPage(args: {

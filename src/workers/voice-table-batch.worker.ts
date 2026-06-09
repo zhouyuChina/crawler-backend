@@ -445,8 +445,9 @@ async function runBatch(
       try {
         const outcome = await crawlPage(dataSource, strategy, payload, page, anchorKeys);
 
+        highestCompletedPage = Math.max(highestCompletedPage, page);
+
         if (range.updateCheckpoint) {
-          highestCompletedPage = Math.max(highestCompletedPage, page);
           if (page === range.end || page % CHECKPOINT_INTERVAL_PAGES === 0) {
             await upsertCrawlState(dataSource, payload.crmKey, module, payload.mid, {
               lastCompletedPage: highestCompletedPage,
