@@ -22,7 +22,7 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** 单页抓取失败后的最大重试次数（实际最多尝试 MAX_RETRIES + 1 次） */
 const MAX_RETRIES = 2;
 /** 翻页间隔，避免对 CRM 请求过于密集 */
-const PAGE_DELAY_MS = 100;
+const PAGE_DELAY_MS = 50;
 /** checkpoint 写库间隔页数，降低高频 DB 往返开销 */
 const CHECKPOINT_INTERVAL_PAGES = 50;
 /** 单页 HTML 响应体大小上限（2MB），超出则拒绝 */
