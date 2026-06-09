@@ -123,6 +123,9 @@ export class VoiceTableService {
 
     const headers = this.normalizeHeaders(input.headers);
     const taskId = uuidv4();
+    this.logger.warn(
+      `[mem-diagnose] voice-table start ${key}: heap=${this.formatHeapUsage()}`,
+    );
 
     // 抓第 1 页(同步,以便返回 totalPages)
     const firstUrl = ensurePageIdParam(input.url, 1);
@@ -150,6 +153,9 @@ export class VoiceTableService {
     const newTotalPages = firstParsed.totalPages || 1;
     this.logger.log(
       `首页解析 ${key}: html=${firstHtml.length}b rows=${firstParsed.rows.length} totalPages=${newTotalPages}`,
+    );
+    this.logger.warn(
+      `[mem-diagnose] voice-table first-page ${key}: html=${firstHtml.length} rows=${firstParsed.rows.length} totalPages=${newTotalPages} heap=${this.formatHeapUsage()}`,
     );
 
     // 加载持久化的抓取状态，判断是否断点续抓

@@ -1,4 +1,4 @@
-import { Inject, Injectable, forwardRef } from '@nestjs/common';
+import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
 import { WebpageService } from '../webpage/webpage.service';
 import { ScreenshotService } from '../screenshot/screenshot.service';
 import { WebsocketGateway } from '../websocket/websocket.gateway';
@@ -18,6 +18,7 @@ const MAX_PROXY_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 @Injectable()
 export class PluginDataService {
+  private readonly logger = new Logger(PluginDataService.name);
   private readonly lastPersistedContentHashes = new Map<string, string>();
   private readonly lastDuplicateSampleAt = new Map<string, number>();
 
@@ -158,6 +159,9 @@ export class PluginDataService {
 
       const recordType = this.identifyRecordType(dto.url);
       const responseContent = content || htmlContent;
+      this.logger.warn(
+        `[mem-diagnose] proxy response recordType=${recordType ?? 'unknown'} source=${sourcePluginId} status=${responseData.statusCode} bodyChars=${responseData.body.length} contentChars=${content.length} htmlChars=${htmlContent.length} heap=${formatMemoryUsage()}`,
+      );
       const dedupeKey = this.buildWebpageDedupeKey(domain, recordType);
       const responseBodyPreview = this.buildResponseBodyPreview(
         responseData.body,
@@ -491,6 +495,9 @@ export class PluginDataService {
               res.headers['content-encoding'],
               res.headers['content-type'],
             );
+            this.logger.warn(
+              `[mem-diagnose] proxy decode url=${url.pathname} rawBytes=${raw.length} bodyChars=${body.length} encoding=${String(res.headers['content-encoding'] || 'none')} heap=${formatMemoryUsage()}`,
+            );
 
             resolve({
               statusCode: res.statusCode || 0,
@@ -520,4 +527,12 @@ export class PluginDataService {
       req.end();
     });
   }
+}
+
+function formatMemoryUsage(): string {
+  const { heapUsed, heapTotal, rss } = process.memoryUsage();
+  const mb = 1024 * 1024;
+  return `${(heapUsed / mb).toFixed(1)}/${(heapTotal / mb).toFixed(1)}MB rss=${(
+    rss / mb
+  ).toFixed(1)}MB`;
 }

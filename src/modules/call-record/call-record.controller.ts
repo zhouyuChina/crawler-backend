@@ -29,17 +29,24 @@ export class CallRecordController {
     @Query('page') page?: number,
     @Query('limit') limit?: number,
     @Query('recordType') recordType?: string,
+    @Query('full') full?: string,
   ) {
     return this.callRecordService.findAll({
       page: page || 1,
       limit: limit || 20,
       recordType,
+      full: full === '1' || full === 'true',
     });
   }
 
   @Get('latest/:recordType')
-  async findLatestByType(@Param('recordType') recordType: string) {
-    const record = await this.callRecordService.findLatestByType(recordType);
+  async findLatestByType(
+    @Param('recordType') recordType: string,
+    @Query('full') full?: string,
+  ) {
+    const record = await this.callRecordService.findLatestByType(recordType, {
+      full: full === '1' || full === 'true',
+    });
 
     if (!record) {
       return {

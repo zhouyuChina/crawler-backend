@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
@@ -9,8 +9,13 @@ import * as https from 'https';
 import type { Response } from 'express';
 import { createHash } from 'crypto';
 
+const CALL_RECORD_PREVIEW_CHARS = 64 * 1024;
+const CALL_RECORD_SCAN_LIMIT = 1000;
+
 @Injectable()
 export class CallRecordService {
+  private readonly logger = new Logger(CallRecordService.name);
+
   // URL 关键词映射
   private readonly RECORD_TYPE_KEYWORDS = {
     get_peer_status: 'get_peer_status',
@@ -70,11 +75,21 @@ export class CallRecordService {
   /**
    * 查询列表（分页）- 按被叫号码去重，只保留最新记录
    */
-  async findAll(params: { page: number; limit: number; recordType?: string }) {
-    const { page, limit, recordType } = params;
+  async findAll(params: {
+    page: number;
+    limit: number;
+    recordType?: string;
+    full?: boolean;
+  }) {
+    const { page, limit, recordType, full } = params;
 
-    // 第一步：查询所有符合条件的记录
+    // 第一步：查询符合条件的记录。默认只取 preview，避免高频接口把历史大 HTML 拉进 Node 堆。
     const queryBuilder = this.webpageRepository.createQueryBuilder('webpage');
+    if (!full) {
+      this.selectPreviewColumns(queryBuilder);
+      queryBuilder.setParameter('previewLimit', CALL_RECORD_PREVIEW_CHARS);
+      queryBuilder.limit(CALL_RECORD_SCAN_LIMIT);
+    }
 
     // 如果指定了 recordType，按 URL 关键词过滤
     if (recordType && this.RECORD_TYPE_KEYWORDS[recordType]) {
@@ -92,7 +107,16 @@ export class CallRecordService {
     // 按创建时间倒序排列（最新的在前）
     queryBuilder.orderBy('webpage.createdAt', 'DESC');
 
-    const allItems = await queryBuilder.getMany();
+    const allItems = full
+      ? await queryBuilder.getMany()
+      : (await queryBuilder.getRawMany()).map((row) => this.mapPreviewRow(row));
+    const maxContentChars = allItems.reduce((max, item) => {
+      const content = item.htmlContent || item.content || '';
+      return Math.max(max, content.length);
+    }, 0);
+    this.logger.warn(
+      `[mem-diagnose] call-records list recordType=${recordType ?? 'all'} full=${Boolean(full)} rows=${allItems.length} maxContentChars=${maxContentChars} heap=${formatMemoryUsage()}`,
+    );
 
     // 第二步：按被叫号码去重，保留每个号码的最新记录
     const uniqueRecordsMap = new Map<string, any>();
@@ -128,7 +152,10 @@ export class CallRecordService {
   /**
    * 查询最新记录（按类型）
    */
-  async findLatestByType(recordType: string): Promise<Webpage | null> {
+  async findLatestByType(
+    recordType: string,
+    options: { full?: boolean } = {},
+  ): Promise<Partial<Webpage> | null> {
     const keyword = this.RECORD_TYPE_KEYWORDS[recordType];
 
     if (!keyword) {
@@ -136,6 +163,10 @@ export class CallRecordService {
     }
 
     const queryBuilder = this.webpageRepository.createQueryBuilder('webpage');
+    if (!options.full) {
+      this.selectPreviewColumns(queryBuilder);
+      queryBuilder.setParameter('previewLimit', CALL_RECORD_PREVIEW_CHARS);
+    }
     queryBuilder.where('webpage.url LIKE :url', { url: `%${keyword}%` });
 
     // 排除包含 "無任何通話記錄" 的记录
@@ -146,7 +177,64 @@ export class CallRecordService {
 
     queryBuilder.orderBy('webpage.createdAt', 'DESC');
 
-    return await queryBuilder.getOne();
+    if (options.full) {
+      const record = await queryBuilder.getOne();
+      this.logger.warn(
+        `[mem-diagnose] call-records latest recordType=${recordType} full=true contentChars=${this.getRecordContentLength(record)} heap=${formatMemoryUsage()}`,
+      );
+      return record;
+    }
+
+    const row = await queryBuilder.getRawOne();
+    const record = row ? this.mapPreviewRow(row) : null;
+    this.logger.warn(
+      `[mem-diagnose] call-records latest recordType=${recordType} full=false contentChars=${this.getRecordContentLength(record)} heap=${formatMemoryUsage()}`,
+    );
+    return record;
+  }
+
+  private selectPreviewColumns(queryBuilder: any) {
+    queryBuilder
+      .select('webpage.id', 'id')
+      .addSelect('webpage.url', 'url')
+      .addSelect('webpage.title', 'title')
+      .addSelect(
+        'SUBSTRING(webpage.content FROM 1 FOR :previewLimit)',
+        'content',
+      )
+      .addSelect(
+        'SUBSTRING(webpage."htmlContent" FROM 1 FOR :previewLimit)',
+        'htmlContent',
+      )
+      .addSelect('webpage.domain', 'domain')
+      .addSelect('webpage.metadata', 'metadata')
+      .addSelect('webpage."sourcePluginId"', 'sourcePluginId')
+      .addSelect('webpage."browserType"', 'browserType')
+      .addSelect('webpage."createdAt"', 'createdAt')
+      .addSelect('webpage."updatedAt"', 'updatedAt')
+      .addSelect('webpage."capturedAt"', 'capturedAt');
+  }
+
+  private mapPreviewRow(row: any): Partial<Webpage> {
+    return {
+      id: row.id,
+      url: row.url,
+      title: row.title,
+      content: row.content,
+      htmlContent: row.htmlContent,
+      domain: row.domain,
+      metadata: row.metadata,
+      sourcePluginId: row.sourcePluginId,
+      browserType: row.browserType,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      capturedAt: row.capturedAt,
+    };
+  }
+
+  private getRecordContentLength(record: Partial<Webpage> | null): number {
+    if (!record) return 0;
+    return (record.htmlContent || record.content || '').length;
   }
 
   /**
@@ -307,4 +395,12 @@ export class CallRecordService {
 
     req.end();
   }
+}
+
+function formatMemoryUsage(): string {
+  const { heapUsed, heapTotal, rss } = process.memoryUsage();
+  const mb = 1024 * 1024;
+  return `${(heapUsed / mb).toFixed(1)}/${(heapTotal / mb).toFixed(1)}MB rss=${(
+    rss / mb
+  ).toFixed(1)}MB`;
 }
