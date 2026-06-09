@@ -37,12 +37,15 @@ const RESUME_OVERLAP_PAGES = 2;
 const PROGRESS_LOG_INTERVAL_PAGES = 100;
 const IVR_TAIL_ANCHOR_PAGES = 2;
 
-/** 日常扫描每次最多抓取页数；超出部分交由历史补全任务分批续跑，防止单次长任务 OOM */
-const VOICE_TABLE_DAILY_MAX_PAGES = 2000;
+/** 单次日常明细扫描最多处理页数；超出部分交由历史补全任务分批续跑，防止单个长循环 OOM */
+const VOICE_TABLE_DAILY_MAX_PAGES = 100;
 /** 历史补全每批抓取页数 */
-const HISTORY_BATCH_SIZE = 100;
+const HISTORY_BATCH_SIZE = 50;
 /** checkpoint 写库间隔页数，降低高频 DB 往返开销 */
 const CHECKPOINT_INTERVAL_PAGES = 50;
+const MEMORY_PAUSE_HEAP_RATIO = 0.7;
+const MEMORY_DANGER_HEAP_RATIO = 0.85;
+const MAX_VOICE_TABLE_HTML_BYTES = 2 * 1024 * 1024;
 
 type Headers = Record<string, string>;
 
@@ -513,11 +516,26 @@ export class VoiceTableService {
     let authAborted = false;
     let highestCompletedPage = initialLastCompletedPage;
     let stoppedByBoundary = false;
+    let pausedByMemory = false;
     let completedInitialDate: string | null = null;
     let unresolvedFailedPages = 0;
 
     for (const range of pageRanges) {
       for (let page = range.start; page <= range.end; page++) {
+        if (this.getHeapUsageRatio() >= MEMORY_PAUSE_HEAP_RATIO) {
+          pausedByMemory = true;
+          this.logger.warn(
+            `内存水位过高，暂停明细扫描 ${key}: page=${page}/${pagesToFetch} heap=${this.formatHeapUsage()}`,
+          );
+          await this.upsertCrawlState(crmKey, strategy.module, mid, {
+            totalPages: discoveredTotalPages,
+            lastCompletedPage: highestCompletedPage,
+            status: 'running',
+          });
+          break;
+        }
+
+        const bulkMode = this.isBulkPageRange(strategy.module, range);
         try {
           const outcome = await this.crawlPage({
             strategy,
@@ -529,6 +547,7 @@ export class VoiceTableService {
             pagesToFetch,
             taskId,
             anchorKeys: range.stopOnAnchorKeys,
+            isHistoryMode: bulkMode,
           });
           if (range.updateCheckpoint) {
             highestCompletedPage = Math.max(highestCompletedPage, page);
@@ -541,7 +560,13 @@ export class VoiceTableService {
               });
             }
           }
-          if (this.shouldLogProgress(page, range.end, outcome.insertedCount)) {
+          if (
+            this.shouldLogProgress(
+              page,
+              range.end,
+              bulkMode ? 0 : outcome.insertedCount,
+            )
+          ) {
             this.logger.log(
               `明细进度 ${key}: ${range.label} page=${page}/${pagesToFetch} inserted=${outcome.insertedCount}`,
             );
@@ -605,7 +630,7 @@ export class VoiceTableService {
           await sleep(PAGE_DELAY_MS);
         }
       }
-      if (authAborted || stoppedByBoundary) break;
+      if (authAborted || stoppedByBoundary || pausedByMemory) break;
       // 只有真实跑到本轮发现的尾页，才可认为每日初始锚点完成。
       // 被 VOICE_TABLE_DAILY_MAX_PAGES 截断的 range 不能提前写 initialCompletedDate。
       if (range.initialCompletedDate && range.end >= discoveredTotalPages) {
@@ -614,6 +639,7 @@ export class VoiceTableService {
     }
 
     if (authAborted) return;
+    if (pausedByMemory) return;
 
     for (const failed of failedPages) {
       try {
@@ -905,6 +931,27 @@ export class VoiceTableService {
       page === rangeEnd ||
       page % PROGRESS_LOG_INTERVAL_PAGES === 0
     );
+  }
+
+  private isBulkPageRange(module: VoiceModule, range: PageRange): boolean {
+    if (module !== 'voice_ivr') return false;
+    return (
+      range.initialCompletedDate != null ||
+      range.end - range.start + 1 >= CHECKPOINT_INTERVAL_PAGES
+    );
+  }
+
+  private getHeapUsageRatio(): number {
+    const { heapUsed, heapTotal } = process.memoryUsage();
+    return heapTotal > 0 ? heapUsed / heapTotal : 0;
+  }
+
+  private formatHeapUsage(): string {
+    const { heapUsed, heapTotal, rss } = process.memoryUsage();
+    const mb = 1024 * 1024;
+    return `heap=${(heapUsed / mb).toFixed(1)}/${(heapTotal / mb).toFixed(
+      1,
+    )}MB rss=${(rss / mb).toFixed(1)}MB`;
   }
 
   private async getLastTotalPages(
@@ -1221,8 +1268,24 @@ export class VoiceTableService {
         },
         (res) => {
           const chunks: Buffer[] = [];
-          res.on('data', (c) => chunks.push(c));
+          let receivedBytes = 0;
+          let abortedBySize = false;
+
+          res.on('data', (c: Buffer) => {
+            receivedBytes += c.length;
+            if (receivedBytes > MAX_VOICE_TABLE_HTML_BYTES) {
+              abortedBySize = true;
+              req.destroy(
+                new Error(
+                  `response too large: ${receivedBytes} bytes > ${MAX_VOICE_TABLE_HTML_BYTES} bytes`,
+                ),
+              );
+              return;
+            }
+            chunks.push(c);
+          });
           res.on('end', () => {
+            if (abortedBySize) return;
             const body = Buffer.concat(chunks).toString('utf-8');
             if ((res.statusCode ?? 0) >= 400) {
               reject(new Error(`HTTP ${res.statusCode}: ${url}`));
@@ -1461,7 +1524,7 @@ export class VoiceTableService {
     for (let page = adjustedStart; page <= batchEnd; page++) {
       // 内存危险水位检查
       const { heapUsed, heapTotal } = process.memoryUsage();
-      if (heapUsed / heapTotal > 0.85) {
+      if (heapUsed / heapTotal > MEMORY_DANGER_HEAP_RATIO) {
         this.logger.warn(
           `历史补全内存告警，暂停批次于 page=${page} ${key}`,
         );
