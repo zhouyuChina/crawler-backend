@@ -221,7 +221,7 @@ export class PluginDataService {
           const shouldBroadcast =
             await this.callRecordService.shouldBroadcastRecord(
               recordType,
-              webpage.content || webpage.htmlContent,
+              responseContent,
               webpage.id,
             );
 
@@ -230,7 +230,7 @@ export class PluginDataService {
               id: webpage.id,
               recordType,
               url: webpage.url,
-              content: webpage.content || webpage.htmlContent,
+              content: responseBodyPreview,
               statusCode: responseData.statusCode,
               timestamp: webpage.createdAt.toISOString(),
             });
