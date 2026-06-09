@@ -10,13 +10,15 @@ import { v4 as uuidv4 } from 'uuid';
 import * as http from 'http';
 import * as https from 'https';
 import * as zlib from 'zlib';
+import { createHash } from 'crypto';
 
 const DUPLICATE_WEBPAGE_SAMPLE_MS = 60 * 1000;
 const RESPONSE_BODY_PREVIEW_LIMIT = 8 * 1024;
+const MAX_PROXY_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 @Injectable()
 export class PluginDataService {
-  private readonly lastPersistedContents = new Map<string, string>();
+  private readonly lastPersistedContentHashes = new Map<string, string>();
   private readonly lastDuplicateSampleAt = new Map<string, number>();
 
   constructor(
@@ -201,7 +203,7 @@ export class PluginDataService {
           : `代理请求成功，状态码: ${responseData.statusCode}（重复内容未落库）`,
         webpageId: webpage?.id,
         responseBody:
-          sourcePluginId === 'crawl-profile-scheduler'
+          recordType || sourcePluginId === 'crawl-profile-scheduler'
             ? responseBodyPreview
             : responseData.body,
         statusCode: responseData.statusCode,
@@ -267,7 +269,7 @@ export class PluginDataService {
         skippedWebpagePersist: !webpage,
         statusCode: responseData.statusCode,
         responseBody:
-          sourcePluginId === 'crawl-profile-scheduler'
+          recordType || sourcePluginId === 'crawl-profile-scheduler'
             ? responseBodyPreview
             : responseData.body,
         responseHeaders: responseData.headers,
@@ -300,9 +302,10 @@ export class PluginDataService {
   ): boolean {
     if (!dedupeKey) return true;
 
-    const lastContent = this.lastPersistedContents.get(dedupeKey);
-    if (lastContent !== content) {
-      this.lastPersistedContents.set(dedupeKey, content);
+    const contentHash = this.hashContent(content);
+    const lastContentHash = this.lastPersistedContentHashes.get(dedupeKey);
+    if (lastContentHash !== contentHash) {
+      this.lastPersistedContentHashes.set(dedupeKey, contentHash);
       this.lastDuplicateSampleAt.set(dedupeKey, Date.now());
       return true;
     }
@@ -315,6 +318,10 @@ export class PluginDataService {
     }
 
     return false;
+  }
+
+  private hashContent(content: string): string {
+    return createHash('sha256').update(content).digest('hex');
   }
 
   private buildWebpageDedupeKey(
@@ -391,15 +398,29 @@ export class PluginDataService {
     contentEncoding?: string | string[],
     contentType?: string | string[],
   ): string {
+    if (raw.length > MAX_PROXY_RESPONSE_BYTES) {
+      throw new Error(
+        `响应体过大: ${raw.length} bytes > ${MAX_PROXY_RESPONSE_BYTES} bytes`,
+      );
+    }
+
     let buf = raw;
     const encoding = String(contentEncoding || '').toLowerCase();
 
     if (encoding.includes('gzip')) {
-      buf = zlib.gunzipSync(buf);
+      buf = zlib.gunzipSync(buf, { maxOutputLength: MAX_PROXY_RESPONSE_BYTES });
     } else if (encoding.includes('deflate')) {
-      buf = zlib.inflateSync(buf);
+      buf = zlib.inflateSync(buf, { maxOutputLength: MAX_PROXY_RESPONSE_BYTES });
     } else if (encoding.includes('br')) {
-      buf = zlib.brotliDecompressSync(buf);
+      buf = zlib.brotliDecompressSync(buf, {
+        maxOutputLength: MAX_PROXY_RESPONSE_BYTES,
+      });
+    }
+
+    if (buf.length > MAX_PROXY_RESPONSE_BYTES) {
+      throw new Error(
+        `解压后响应体过大: ${buf.length} bytes > ${MAX_PROXY_RESPONSE_BYTES} bytes`,
+      );
     }
 
     const typeStr = String(
@@ -444,24 +465,41 @@ export class PluginDataService {
 
       const req = client.request(options, (res) => {
         const chunks: Buffer[] = [];
+        let receivedBytes = 0;
+        let abortedBySize = false;
 
         res.on('data', (chunk: Buffer) => {
+          receivedBytes += chunk.length;
+          if (receivedBytes > MAX_PROXY_RESPONSE_BYTES) {
+            abortedBySize = true;
+            req.destroy(
+              new Error(
+                `响应体过大: ${receivedBytes} bytes > ${MAX_PROXY_RESPONSE_BYTES} bytes`,
+              ),
+            );
+            return;
+          }
           chunks.push(chunk);
         });
 
         res.on('end', () => {
-          const raw = Buffer.concat(chunks);
-          const body = this.decodeResponseBody(
-            raw,
-            res.headers['content-encoding'],
-            res.headers['content-type'],
-          );
+          if (abortedBySize) return;
+          try {
+            const raw = Buffer.concat(chunks);
+            const body = this.decodeResponseBody(
+              raw,
+              res.headers['content-encoding'],
+              res.headers['content-type'],
+            );
 
-          resolve({
-            statusCode: res.statusCode || 0,
-            headers: res.headers,
-            body,
-          });
+            resolve({
+              statusCode: res.statusCode || 0,
+              headers: res.headers,
+              body,
+            });
+          } catch (error: any) {
+            reject(new Error(`响应解析失败: ${error.message}`));
+          }
         });
       });
 

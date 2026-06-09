@@ -7,6 +7,7 @@ import { WebsocketGateway } from '../websocket/websocket.gateway';
 import * as http from 'http';
 import * as https from 'https';
 import type { Response } from 'express';
+import { createHash } from 'crypto';
 
 @Injectable()
 export class CallRecordService {
@@ -30,8 +31,8 @@ export class CallRecordService {
     }
   >();
 
-  // 记录每种类型的最新内容（用于去重）
-  private lastRecordContents = new Map<string, string>();
+  // 记录每种类型的最新内容 hash（用于去重，避免常驻保存完整 HTML）
+  private lastRecordContentHashes = new Map<string, string>();
 
   constructor(
     @InjectRepository(Webpage)
@@ -195,16 +196,21 @@ export class CallRecordService {
       return false;
     }
 
-    const lastContent = this.lastRecordContents.get(recordType);
+    const contentHash = this.hashContent(content);
+    const lastContentHash = this.lastRecordContentHashes.get(recordType);
 
     // 如果内容与上次相同，则跳过广播
-    if (lastContent === content) {
+    if (lastContentHash === contentHash) {
       return false;
     }
 
-    // 更新最新内容
-    this.lastRecordContents.set(recordType, content);
+    // 更新最新内容 hash
+    this.lastRecordContentHashes.set(recordType, contentHash);
     return true;
+  }
+
+  private hashContent(content: string): string {
+    return createHash('sha256').update(content).digest('hex');
   }
 
   /**
