@@ -207,10 +207,15 @@ export class VoiceTableService {
     const crawlState = await this.crawlStateRepo.findOne({
       where: { crmKey, module: strategy.module, mid },
     });
+    const businessDate = this.getBeijingDateKey();
+    const isNewBusinessDate =
+      crawlState?.initialCompletedDate !== businessDate;
     const hasPendingHistory =
-      crawlState?.historyStatus === 'pending' ||
-      crawlState?.historyStatus === 'running';
+      !isNewBusinessDate &&
+      (crawlState?.historyStatus === 'pending' ||
+        crawlState?.historyStatus === 'running');
     const isIncomplete =
+      !isNewBusinessDate &&
       crawlState &&
       crawlState.status !== 'completed' &&
       crawlState.lastCompletedPage > 0;
@@ -218,9 +223,8 @@ export class VoiceTableService {
     let pagesToFetch: number;
     let pageRanges: PageRange[];
     let shouldBackfillHistory = false;
-    const businessDate = this.getBusinessDate(strategy.module, firstParsed.rows);
     const needsDailyBackfill =
-      businessDate != null && crawlState?.initialCompletedDate !== businessDate;
+      crawlState?.initialCompletedDate !== businessDate;
     const needsHistoryCatchup = this.needsIvrHistoryCatchup(
       strategy.module,
       crawlState,
@@ -541,7 +545,7 @@ export class VoiceTableService {
         totalPages: newTotalPages,
         status: 'completed',
         lastCompletedPage: pagesToFetch,
-        initialCompletedDate: needsDailyBackfill
+        initialCompletedDate: isNewBusinessDate
           ? businessDate
           : crawlState?.initialCompletedDate,
       });
@@ -1485,27 +1489,10 @@ export class VoiceTableService {
     return Math.max(fromDaily, fromPending, fromLegacy);
   }
 
-  private getBusinessDate(
-    module: VoiceModule,
-    rows: ParsedRowVoiceIvr[] | ParsedRowVoiceOp[],
-  ): string | null {
-    return module === 'voice_ivr'
-      ? this.getIvrBusinessDate(rows as ParsedRowVoiceIvr[])
-      : this.getOpBusinessDate(rows as ParsedRowVoiceOp[]);
-  }
-
-  private getIvrBusinessDate(rows: ParsedRowVoiceIvr[]): string | null {
-    for (const row of rows) {
-      if (row.callDate) return this.formatDateKey(row.callDate);
-    }
-    return null;
-  }
-
-  private getOpBusinessDate(rows: ParsedRowVoiceOp[]): string | null {
-    for (const row of rows) {
-      if (row.callDate) return this.formatDateKey(row.callDate);
-    }
-    return null;
+  private getBeijingDateKey(date = new Date()): string {
+    return new Date(date.getTime() + 8 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
   }
 
   private buildIvrAnchorKey(

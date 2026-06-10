@@ -346,13 +346,18 @@ async function runStartCrawl(
   const crawlState = await dataSource.getRepository(VoiceCrawlState).findOne({
     where: { crmKey: payload.crmKey, module: strategy.module, mid: payload.mid },
   });
+  const businessDate = getBeijingDateKey();
+  const isNewBusinessDate = crawlState?.initialCompletedDate !== businessDate;
   const hasPendingHistory =
-    crawlState?.historyStatus === 'pending' || crawlState?.historyStatus === 'running';
+    !isNewBusinessDate &&
+    (crawlState?.historyStatus === 'pending' || crawlState?.historyStatus === 'running');
   const isIncomplete =
-    crawlState && crawlState.status !== 'completed' && crawlState.lastCompletedPage > 0;
-  const businessDate = getBusinessDate(strategy.module, firstParsed.rows);
+    !isNewBusinessDate &&
+    crawlState &&
+    crawlState.status !== 'completed' &&
+    crawlState.lastCompletedPage > 0;
   const needsDailyBackfill =
-    businessDate != null && crawlState?.initialCompletedDate !== businessDate;
+    crawlState?.initialCompletedDate !== businessDate;
 
   let pagesToFetch: number;
   let pageRanges: WorkerPageRange[];
@@ -483,7 +488,7 @@ async function runStartCrawl(
       totalPages,
       status: 'completed',
       lastCompletedPage: pagesToFetch,
-      initialCompletedDate: needsDailyBackfill ? businessDate : crawlState?.initialCompletedDate,
+      initialCompletedDate: isNewBusinessDate ? businessDate : crawlState?.initialCompletedDate,
     });
     if (needsHistoryCatchup) {
       await markIvrHistoryPending(dataSource, payload, crawlState, {
@@ -1226,6 +1231,12 @@ function formatDateKey(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+function getBeijingDateKey(date = new Date()): string {
+  return new Date(date.getTime() + 8 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
 }
 
 function createDataSource(): DataSource {
