@@ -204,25 +204,23 @@ export class VoiceTableService {
     let pagesToFetch: number;
     let pageRanges: PageRange[];
     let shouldBackfillHistory = false;
-    const ivrBusinessDate =
-      strategy.module === 'voice_ivr'
-        ? this.getIvrBusinessDate(firstParsed.rows as ParsedRowVoiceIvr[])
-        : null;
-    const needsIvrDailyAnchor =
-      strategy.module === 'voice_ivr' &&
-      ivrBusinessDate != null &&
-      crawlState?.initialCompletedDate !== ivrBusinessDate;
+    const businessDate = this.getBusinessDate(strategy.module, firstParsed.rows);
+    const needsDailyBackfill =
+      businessDate != null && crawlState?.initialCompletedDate !== businessDate;
 
-    if (needsIvrDailyAnchor) {
+    if (needsDailyBackfill) {
       shouldBackfillHistory = true;
-      const tailAnchorKeys = await this.fetchIvrTailAnchorKeys({
-        strategy,
-        crmKey,
-        mid,
-        baseUrl: input.url,
-        headers,
-        totalPages: newTotalPages,
-      });
+      const tailAnchorKeys =
+        strategy.module === 'voice_ivr'
+          ? await this.fetchIvrTailAnchorKeys({
+              strategy,
+              crmKey,
+              mid,
+              baseUrl: input.url,
+              headers,
+              totalPages: newTotalPages,
+            })
+          : new Set<string>();
       // 每日锚点扫描上限：超出页数由历史补全任务分批续跑，避免单次长任务 OOM
       const dailyCap = Math.min(newTotalPages, VOICE_TABLE_DAILY_MAX_PAGES);
       pagesToFetch = dailyCap;
@@ -232,15 +230,18 @@ export class VoiceTableService {
               {
                 start: 2,
                 end: dailyCap,
-                label: '每日初始锚点',
+                label:
+                  strategy.module === 'voice_ivr'
+                    ? '每日初始锚点'
+                    : '每日初始',
                 updateCheckpoint: true,
                 stopOnAnchorKeys: tailAnchorKeys,
-                initialCompletedDate: ivrBusinessDate,
+                initialCompletedDate: businessDate,
               },
             ]
           : [];
       this.logger.log(
-        `IVR 每日初始锚点 ${key}: date=${ivrBusinessDate} anchors=${tailAnchorKeys.size} 日常上限 ${dailyCap}/${newTotalPages} 页`,
+        `每日初始 ${key}: date=${businessDate} anchors=${tailAnchorKeys.size} 日常上限 ${dailyCap}/${newTotalPages} 页`,
       );
     } else if (strategy.module === 'voice_ivr') {
       pagesToFetch = Math.min(newTotalPages, VOICE_TABLE_DAILY_MAX_PAGES);
@@ -311,7 +312,7 @@ export class VoiceTableService {
       THROTTLE_MS - (now - lastDetailStart),
     );
     // 有未完成页或每日初始锚点任务时跳过节流，确保能补齐缺口。
-    const hasPendingDetail = isIncomplete || needsIvrDailyAnchor;
+    const hasPendingDetail = isIncomplete || needsDailyBackfill;
     const detailThrottled = !hasPendingDetail && detailRetryAfterMs > 0;
 
     // 写入第一页行 + WS 推送
@@ -334,7 +335,7 @@ export class VoiceTableService {
     }
     if (
       strategy.module === 'voice_ivr' &&
-      !needsIvrDailyAnchor &&
+      !needsDailyBackfill &&
       firstParsed.rows.length > 0 &&
       insertedFirst.length === 0
     ) {
@@ -380,6 +381,9 @@ export class VoiceTableService {
           ? crawlState.lastCompletedPage
           : Math.min(1, pagesToFetch),
       status: 'running',
+      ...(needsDailyBackfill && businessDate
+        ? { initialCompletedDate: businessDate }
+        : {}),
     });
 
     if (detailBusy) {
@@ -418,7 +422,8 @@ export class VoiceTableService {
           key,
           totalPagesRef: newTotalPages,
           nextPage: pagesToFetch + 1,
-          ivrBusinessDate: ivrBusinessDate ?? undefined,
+          businessDate: businessDate ?? undefined,
+          resetHistoryCursor: shouldBackfillHistory,
         }).catch((err) =>
           this.logger.error(`历史补全调度失败 ${key}: ${err.message}`),
         );
@@ -476,7 +481,8 @@ export class VoiceTableService {
               key,
               totalPagesRef: newTotalPages,
               nextPage: pagesToFetch + 1,
-              ivrBusinessDate: ivrBusinessDate ?? undefined,
+              businessDate: businessDate ?? undefined,
+              resetHistoryCursor: shouldBackfillHistory,
             }).catch((err) =>
               this.logger.error(`历史补全调度失败 ${key}: ${err.message}`),
             );
@@ -488,8 +494,8 @@ export class VoiceTableService {
         totalPages: newTotalPages,
         status: 'completed',
         lastCompletedPage: pagesToFetch,
-        initialCompletedDate: needsIvrDailyAnchor
-          ? ivrBusinessDate
+        initialCompletedDate: needsDailyBackfill
+          ? businessDate
           : crawlState?.initialCompletedDate,
       });
       if (
@@ -505,7 +511,8 @@ export class VoiceTableService {
           key,
           totalPagesRef: newTotalPages,
           nextPage: pagesToFetch + 1,
-          ivrBusinessDate: ivrBusinessDate ?? undefined,
+          businessDate: businessDate ?? undefined,
+          resetHistoryCursor: needsDailyBackfill,
         }).catch((err) =>
           this.logger.error(`历史补全调度失败 ${key}: ${err.message}`),
         );
@@ -1234,7 +1241,23 @@ export class VoiceTableService {
     return false;
   }
 
+  private getBusinessDate(
+    module: VoiceModule,
+    rows: ParsedRowVoiceIvr[] | ParsedRowVoiceOp[],
+  ): string | null {
+    return module === 'voice_ivr'
+      ? this.getIvrBusinessDate(rows as ParsedRowVoiceIvr[])
+      : this.getOpBusinessDate(rows as ParsedRowVoiceOp[]);
+  }
+
   private getIvrBusinessDate(rows: ParsedRowVoiceIvr[]): string | null {
+    for (const row of rows) {
+      if (row.callDate) return this.formatDateKey(row.callDate);
+    }
+    return null;
+  }
+
+  private getOpBusinessDate(rows: ParsedRowVoiceOp[]): string | null {
     for (const row of rows) {
       if (row.callDate) return this.formatDateKey(row.callDate);
     }
@@ -1812,17 +1835,27 @@ export class VoiceTableService {
     key: string;
     totalPagesRef: number;
     nextPage: number;
-    ivrBusinessDate?: string;
+    businessDate?: string;
+    resetHistoryCursor?: boolean;
   }): Promise<void> {
-    const { strategy, crmKey, mid, key, totalPagesRef, nextPage } = args;
+    const {
+      strategy,
+      crmKey,
+      mid,
+      key,
+      totalPagesRef,
+      nextPage,
+      resetHistoryCursor,
+    } = args;
 
     // 写入或更新历史游标（仅当尚无待运行游标时才覆盖 nextPage）
     const existing = await this.crawlStateRepo.findOne({
       where: { crmKey, module: strategy.module, mid },
     });
     const alreadyPending =
-      existing?.historyStatus === 'pending' ||
-      existing?.historyStatus === 'running';
+      !resetHistoryCursor &&
+      (existing?.historyStatus === 'pending' ||
+        existing?.historyStatus === 'running');
 
     await this.upsertCrawlState(crmKey, strategy.module, mid, {
       historyStatus: 'pending',
@@ -1867,9 +1900,9 @@ export class VoiceTableService {
     baseUrl: string;
     headers: Headers;
     key: string;
-    ivrBusinessDate?: string;
+    businessDate?: string;
   }): Promise<void> {
-    const { strategy, crmKey, mid, baseUrl, headers, key, ivrBusinessDate } =
+    const { strategy, crmKey, mid, baseUrl, headers, key, businessDate } =
       args;
 
     const state = await this.crawlStateRepo.findOne({
@@ -1928,7 +1961,7 @@ export class VoiceTableService {
 
     // IVR 重新获取尾页锚点（每批获取，2 次额外 fetch，代价小）
     let tailAnchorKeys: Set<string> | undefined;
-    if (strategy.module === 'voice_ivr' && ivrBusinessDate) {
+    if (strategy.module === 'voice_ivr' && businessDate) {
       try {
         tailAnchorKeys = await this.fetchIvrTailAnchorKeys({
           strategy,
@@ -2008,8 +2041,8 @@ export class VoiceTableService {
       historyNextPage: nextHistoryPage,
       historyTotalPagesRef: isDone ? null : currentTotalPages,
       historyBatchFinishedAt: new Date(),
-      ...(anchorFoundInBatch && ivrBusinessDate
-        ? { initialCompletedDate: ivrBusinessDate }
+      ...(isDone && businessDate
+        ? { initialCompletedDate: businessDate }
         : {}),
     });
 

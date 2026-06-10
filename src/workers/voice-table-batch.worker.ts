@@ -137,10 +137,7 @@ async function runHistoryBatch(
   logWorker(
     `history first-page module=${strategy.module} mid=${payload.mid} html=${firstHtml.length} totalPages=${currentTotalPages}`,
   );
-  const ivrBusinessDate =
-    strategy.module === 'voice_ivr'
-      ? getIvrBusinessDate(firstParsed.rows as ParsedRowVoiceIvr[])
-      : null;
+  const businessDate = getBusinessDate(strategy.module, firstParsed.rows);
   const drift = state.historyTotalPagesRef
     ? Math.max(0, currentTotalPages - state.historyTotalPagesRef)
     : 0;
@@ -201,9 +198,7 @@ async function runHistoryBatch(
         updateCheckpoint: false,
         stopOnAnchorKeys: Array.from(tailAnchorKeys),
         initialCompletedDate:
-          strategy.module === 'voice_ivr'
-            ? (ivrBusinessDate ?? undefined)
-            : undefined,
+          strategy.module === 'voice_ivr' ? (businessDate ?? undefined) : undefined,
       },
     ],
     initialLastCompletedPage: adjustedStart - 1,
@@ -232,9 +227,7 @@ async function runHistoryBatch(
     historyNextPage: isDone ? null : batchResult.highestCompletedPage + 1,
     historyTotalPagesRef: isDone ? null : currentTotalPages,
     historyBatchFinishedAt: new Date(),
-    ...(strategy.module === 'voice_ivr' && batchResult.anchorFound && ivrBusinessDate
-      ? { initialCompletedDate: ivrBusinessDate }
-      : {}),
+    ...(isDone && businessDate ? { initialCompletedDate: businessDate } : {}),
   });
 
   return {
@@ -265,21 +258,19 @@ async function runStartCrawl(
     crawlState?.historyStatus === 'pending' || crawlState?.historyStatus === 'running';
   const isIncomplete =
     crawlState && crawlState.status !== 'completed' && crawlState.lastCompletedPage > 0;
-  const ivrBusinessDate =
-    strategy.module === 'voice_ivr'
-      ? getIvrBusinessDate(firstParsed.rows as ParsedRowVoiceIvr[])
-      : null;
-  const needsIvrDailyAnchor =
-    strategy.module === 'voice_ivr' &&
-    ivrBusinessDate != null &&
-    crawlState?.initialCompletedDate !== ivrBusinessDate;
+  const businessDate = getBusinessDate(strategy.module, firstParsed.rows);
+  const needsDailyBackfill =
+    businessDate != null && crawlState?.initialCompletedDate !== businessDate;
 
   let pagesToFetch: number;
   let pageRanges: WorkerPageRange[];
   let shouldBackfillHistory = false;
-  if (needsIvrDailyAnchor) {
+  if (needsDailyBackfill) {
     shouldBackfillHistory = true;
-    const tailAnchorKeys = await fetchIvrTailAnchorKeys(dataSource, strategy, payload, totalPages);
+    const tailAnchorKeys =
+      strategy.module === 'voice_ivr'
+        ? await fetchIvrTailAnchorKeys(dataSource, strategy, payload, totalPages)
+        : new Set<string>();
     const dailyCap = Math.min(totalPages, VOICE_TABLE_DAILY_MAX_PAGES);
     pagesToFetch = dailyCap;
     pageRanges =
@@ -288,15 +279,15 @@ async function runStartCrawl(
             {
               start: 2,
               end: dailyCap,
-              label: '每日初始锚点',
+              label: strategy.module === 'voice_ivr' ? '每日初始锚点' : '每日初始',
               updateCheckpoint: true,
               stopOnAnchorKeys: Array.from(tailAnchorKeys),
-              initialCompletedDate: ivrBusinessDate,
+              initialCompletedDate: businessDate,
             },
           ]
         : [];
     logWorker(
-      `start daily-anchor module=${strategy.module} mid=${payload.mid} date=${ivrBusinessDate} range=2-${dailyCap}/${totalPages} anchors=${tailAnchorKeys.size}`,
+      `start daily-backfill module=${strategy.module} mid=${payload.mid} date=${businessDate} range=2-${dailyCap}/${totalPages} anchors=${tailAnchorKeys.size}`,
     );
   } else if (strategy.module === 'voice_ivr') {
     pagesToFetch = Math.min(totalPages, VOICE_TABLE_DAILY_MAX_PAGES);
@@ -348,7 +339,7 @@ async function runStartCrawl(
 
   if (
     strategy.module === 'voice_ivr' &&
-    !needsIvrDailyAnchor &&
+    !needsDailyBackfill &&
     firstParsed.rows.length > 0 &&
     insertedFirst.length === 0
   ) {
@@ -376,6 +367,7 @@ async function runStartCrawl(
         ? crawlState.lastCompletedPage
         : Math.min(1, pagesToFetch),
     status: 'running',
+    ...(needsDailyBackfill && businessDate ? { initialCompletedDate: businessDate } : {}),
   });
 
   if (pageRanges.length === 0) {
@@ -383,7 +375,7 @@ async function runStartCrawl(
       totalPages,
       status: 'completed',
       lastCompletedPage: pagesToFetch,
-      initialCompletedDate: needsIvrDailyAnchor ? ivrBusinessDate : crawlState?.initialCompletedDate,
+      initialCompletedDate: needsDailyBackfill ? businessDate : crawlState?.initialCompletedDate,
     });
     return {
       success: true,
@@ -420,7 +412,7 @@ async function runStartCrawl(
       historyStatus: 'pending',
     };
     // 重启恢复时保留已有历史游标，避免把 3051 之类的断点重置成 dailyCap + 1。
-    if (!hasPendingHistory) {
+    if (!hasPendingHistory || needsDailyBackfill) {
       historyUpdate.historyNextPage = pagesToFetch + 1;
       historyUpdate.historyTotalPagesRef = totalPages;
     }
@@ -903,7 +895,23 @@ function mergePageRanges(ranges: WorkerPageRange[]): WorkerPageRange[] {
   return merged;
 }
 
+function getBusinessDate(
+  module: VoiceModule,
+  rows: ParsedRowVoiceIvr[] | ParsedRowVoiceOp[],
+): string | null {
+  return module === 'voice_ivr'
+    ? getIvrBusinessDate(rows as ParsedRowVoiceIvr[])
+    : getOpBusinessDate(rows as ParsedRowVoiceOp[]);
+}
+
 function getIvrBusinessDate(rows: ParsedRowVoiceIvr[]): string | null {
+  for (const row of rows) {
+    if (row.callDate) return formatDateKey(row.callDate);
+  }
+  return null;
+}
+
+function getOpBusinessDate(rows: ParsedRowVoiceOp[]): string | null {
   for (const row of rows) {
     if (row.callDate) return formatDateKey(row.callDate);
   }

@@ -51,7 +51,7 @@ export class VoiceCrawlState {
   @Column({ type: 'varchar', length: 16, default: 'completed' })
   status: CrawlStateStatus;
 
-  /** IVR 每日锚点全量完成日期，格式 YYYY-MM-DD */
+  /** 当前每日任务的业务日期，格式 YYYY-MM-DD；historyStatus 表示该日历史是否补完 */
   @Column({ type: 'varchar', length: 10, nullable: true })
   initialCompletedDate: string | null;
 
