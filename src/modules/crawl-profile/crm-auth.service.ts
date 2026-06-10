@@ -236,6 +236,9 @@ export class CrmAuthService implements OnModuleInit {
       }
 
       const verifyKey = this.extractVerifyKey(getResult.body);
+      if (!verifyKey) {
+        this.logger.warn(`登录页未提取到 verify_key ${baseUrl} 账号=${username}`);
+      }
       const initialCookies = getResult.setCookies;
 
       // Step 2: POST 登录
@@ -290,7 +293,11 @@ export class CrmAuthService implements OnModuleInit {
       }
 
       // 否则账密错误
-      this.logger.warn(`登录失败 ${baseUrl} 账号=${username}`);
+      this.logger.warn(
+        `登录失败 ${baseUrl} 账号=${username} status=${postResult.statusCode} finalUrl=${postResult.finalUrl ?? '-'} cookies=${allCookies
+          .map((c) => c.split('=')[0])
+          .join(',') || '-'}`,
+      );
       return {
         success: false,
         authStatus: 'login_failed',
@@ -331,8 +338,18 @@ export class CrmAuthService implements OnModuleInit {
   }
 
   private extractVerifyKey(html: string): string | null {
-    const m = html.match(/verify_key['":\s]*['"]([a-zA-Z0-9_-]+)['"]/);
-    return m ? m[1] : null;
+    const inputMatch = html.match(
+      /<input\b[^>]*\bname=["']verify_key["'][^>]*\bvalue=["']([^"']+)["'][^>]*>/i,
+    );
+    if (inputMatch) return inputMatch[1];
+
+    const valueFirstMatch = html.match(
+      /<input\b[^>]*\bvalue=["']([^"']+)["'][^>]*\bname=["']verify_key["'][^>]*>/i,
+    );
+    if (valueFirstMatch) return valueFirstMatch[1];
+
+    const scriptMatch = html.match(/verify_key['":\s]*['"]([a-zA-Z0-9_-]+)['"]/);
+    return scriptMatch ? scriptMatch[1] : null;
   }
 
   private cookiesToHeader(cookies: string[]): string {
