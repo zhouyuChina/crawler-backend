@@ -11,6 +11,7 @@ export type TaskKey =
   | 'cont_controler'
   | 'cc_mrcall'
   | 'cc_voiceivr'
+  | 'cc_voiceivr_initial_refresh'
   | 'cc_voiceop';
 
 /** 任务定义：间隔(ms)和 URL 生成函数 */
@@ -58,6 +59,13 @@ const TASK_DEFS: Record<TaskKey, TaskDef> = {
     },
     isTable: true,
   },
+  cc_voiceivr_initial_refresh: {
+    intervalMs: 60 * 1000,
+    buildUrl: (p) => {
+      const mid = p.mids?.voiceRecords ?? 24;
+      return `${p.baseUrl}/modules/cc_voiceivr/?mid=${mid}`;
+    },
+  },
   cc_voiceop: {
     intervalMs: 5 * 60 * 1000,
     buildUrl: (p) => {
@@ -104,6 +112,24 @@ export class CrmRequestRunnerService {
     };
 
     try {
+      if (taskKey === 'cc_voiceivr_initial_refresh') {
+        const result = await this.voiceTableService.refreshInitialIvrRecords({
+          crmKey: profile.baseUrl,
+          url,
+          headers,
+        });
+        if (!result.success) {
+          throw new Error(result.message || 'ivr initial refresh failed');
+        }
+        this.crmAuthService.touchCookies(profile.id);
+        if (result.processed > 0) {
+          this.logger.debug(
+            `${profile.name}(${taskKey}): 初始状态补偿 ${result.processed} 个 dst`,
+          );
+        }
+        return;
+      }
+
       if (def.isTable) {
         const result = await this.voiceTableService.startCrawl({
           crmKey: profile.baseUrl,

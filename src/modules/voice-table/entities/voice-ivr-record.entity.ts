@@ -10,16 +10,8 @@ import { v4 as uuidv4 } from 'uuid';
 
 @Entity('voice_ivr_records')
 @Index(
-  'uq_voice_ivr_record_with_call_date',
-  ['crmKey', 'mid', 'recordId', 'callDate'],
-  {
-    unique: true,
-    where: '"callDate" IS NOT NULL',
-  },
-)
-@Index(
   'uq_voice_ivr_record_without_call_date',
-  ['crmKey', 'mid', 'recordId'],
+  ['crmKey', 'recordId'],
   {
     unique: true,
     where: '"callDate" IS NULL',
@@ -70,6 +62,24 @@ export class VoiceIvrRecord {
 
   @Column({ type: 'text', nullable: true })
   sourceUrl: string | null;
+
+  @Column({ type: 'boolean', default: false })
+  needsRefresh: boolean;
+
+  @Column({ type: 'timestamp', nullable: true })
+  refreshAfter: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  refreshUntil: Date | null;
+
+  @Column({ type: 'integer', default: 0 })
+  refreshAttempts: number;
+
+  @Column({ type: 'timestamp', nullable: true })
+  lastRefreshAt: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  lastSeenAt: Date | null;
 
   @CreateDateColumn()
   createdAt: Date;

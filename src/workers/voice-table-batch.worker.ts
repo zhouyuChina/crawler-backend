@@ -39,6 +39,14 @@ const VOICE_TABLE_DAILY_MAX_PAGES = 10;
 const HISTORY_BATCH_SIZE = 50;
 /** IVR 尾页锚点检测范围：与主进程一致 */
 const IVR_TAIL_ANCHOR_PAGES = 2;
+/** IVR 初始状态后续会变化，需要进入补偿刷新 */
+const IVR_INITIAL_STATUS_TYPE = '初始狀態';
+/** 初始状态首次延迟刷新，避免立刻请求大概率仍未出结果 */
+const IVR_INITIAL_REFRESH_DELAY_MS = 2 * 60 * 1000;
+/** 初始状态最多跟踪 1 小时，避免无限追请求 */
+const IVR_INITIAL_REFRESH_TTL_MS = 60 * 60 * 1000;
+/** OP 页数较小，直接全量扫以持续修正后变状态 */
+const VOICE_OP_FULL_SCAN_MAX_PAGES = 100;
 
 type Headers = Record<string, string>;
 
@@ -349,7 +357,16 @@ async function runStartCrawl(
   let pagesToFetch: number;
   let pageRanges: WorkerPageRange[];
   let shouldBackfillHistory = false;
-  if (needsDailyBackfill) {
+  if (strategy.module === 'voice_op' && totalPages <= VOICE_OP_FULL_SCAN_MAX_PAGES) {
+    pagesToFetch = totalPages;
+    pageRanges =
+      pagesToFetch >= 2
+        ? [{ start: 2, end: pagesToFetch, label: 'OP 全量更新', updateCheckpoint: true }]
+        : [];
+    logWorker(
+      `start op-full-scan module=${strategy.module} mid=${payload.mid} pages=${pagesToFetch}/${totalPages}`,
+    );
+  } else if (needsDailyBackfill) {
     shouldBackfillHistory = true;
     const tailAnchorKeys =
       strategy.module === 'voice_ivr'
@@ -728,29 +745,13 @@ async function persistRows(
   if (rows.length === 0) return [];
 
   if (module === 'voice_ivr') {
-    const values = (rows as ParsedRowVoiceIvr[]).map((r) => ({
-      id: uuidv4(),
+    return upsertVoiceIvrRecords(
+      dataSource,
       crmKey,
       mid,
-      recordId: r.recordId,
-      src: r.src,
-      dst: r.dst,
-      statusType: r.statusType,
-      reason: r.reason,
-      task: r.task,
-      callDate: r.callDate,
       sourceUrl,
-    }));
-    const result = await dataSource
-      .getRepository(VoiceIvrRecord)
-      .createQueryBuilder()
-      .insert()
-      .into(VoiceIvrRecord)
-      .values(values)
-      .orIgnore()
-      .returning(['id', 'crmKey', 'mid', 'recordId', 'src', 'dst', 'statusType', 'callDate'])
-      .execute();
-    return (result.raw as any[]) ?? [];
+      rows as ParsedRowVoiceIvr[],
+    );
   }
 
   const values = (rows as ParsedRowVoiceOp[]).map((r) => ({
@@ -775,7 +776,8 @@ async function persistRows(
     .into(VoiceOpRecord)
     .values(values)
     .onConflict(
-      `("crmKey", mid, src, dst, ("callDate"::date)) WHERE "callDate" IS NOT NULL DO UPDATE SET
+      `("crmKey", src, dst, ("callDate"::date)) WHERE "callDate" IS NOT NULL DO UPDATE SET
+        mid = EXCLUDED.mid,
         "recordKey" = EXCLUDED."recordKey",
         task = EXCLUDED.task,
         agent = EXCLUDED.agent,
@@ -788,6 +790,122 @@ async function persistRows(
     .returning(['id', 'crmKey', 'mid', 'recordKey', 'src', 'dst', 'callDate'])
     .execute();
   return (result.raw as any[]) ?? [];
+}
+
+async function upsertVoiceIvrRecords(
+  dataSource: DataSource,
+  crmKey: string,
+  mid: number,
+  sourceUrl: string,
+  rows: ParsedRowVoiceIvr[],
+): Promise<any[]> {
+  const seenAt = new Date();
+  const values = rows.map((r) => {
+    const needsRefresh = r.statusType === IVR_INITIAL_STATUS_TYPE;
+    return {
+      id: uuidv4(),
+      crmKey,
+      mid,
+      recordId: r.recordId,
+      src: r.src,
+      dst: r.dst,
+      statusType: r.statusType,
+      reason: r.reason,
+      task: r.task,
+      callDate: r.callDate,
+      sourceUrl,
+      needsRefresh,
+      refreshAfter: needsRefresh
+        ? new Date(seenAt.getTime() + IVR_INITIAL_REFRESH_DELAY_MS)
+        : null,
+      refreshUntil: needsRefresh
+        ? new Date(seenAt.getTime() + IVR_INITIAL_REFRESH_TTL_MS)
+        : null,
+      refreshAttempts: 0,
+      lastRefreshAt: null,
+      lastSeenAt: seenAt,
+    };
+  });
+  const returning = [
+    'id',
+    'crmKey',
+    'mid',
+    'recordId',
+    'src',
+    'dst',
+    'statusType',
+    'callDate',
+    'needsRefresh',
+  ];
+  const withCallDate = values.filter((v) => v.callDate != null);
+  const withoutCallDate = values.filter((v) => v.callDate == null);
+  const raw: any[] = [];
+
+  if (withCallDate.length > 0) {
+    const result = await dataSource
+      .getRepository(VoiceIvrRecord)
+      .createQueryBuilder()
+      .insert()
+      .into(VoiceIvrRecord)
+      .values(withCallDate)
+      .onConflict(
+        `("crmKey", "recordId", ("callDate"::date)) WHERE "callDate" IS NOT NULL DO UPDATE SET
+          mid = EXCLUDED.mid,
+          src = EXCLUDED.src,
+          dst = EXCLUDED.dst,
+          "statusType" = EXCLUDED."statusType",
+          reason = EXCLUDED.reason,
+          task = EXCLUDED.task,
+          "callDate" = EXCLUDED."callDate",
+          "sourceUrl" = EXCLUDED."sourceUrl",
+          "needsRefresh" = EXCLUDED."needsRefresh",
+          "refreshAfter" = CASE
+            WHEN EXCLUDED."needsRefresh" THEN COALESCE(voice_ivr_records."refreshAfter", EXCLUDED."refreshAfter")
+            ELSE NULL
+          END,
+          "refreshUntil" = CASE
+            WHEN EXCLUDED."needsRefresh" THEN COALESCE(voice_ivr_records."refreshUntil", EXCLUDED."refreshUntil")
+            ELSE NULL
+          END,
+          "refreshAttempts" = CASE
+            WHEN EXCLUDED."needsRefresh" THEN voice_ivr_records."refreshAttempts"
+            ELSE 0
+          END,
+          "lastRefreshAt" = CASE
+            WHEN EXCLUDED."needsRefresh" THEN voice_ivr_records."lastRefreshAt"
+            ELSE NULL
+          END,
+          "lastSeenAt" = EXCLUDED."lastSeenAt"
+        WHERE
+          voice_ivr_records.mid IS DISTINCT FROM EXCLUDED.mid OR
+          voice_ivr_records.src IS DISTINCT FROM EXCLUDED.src OR
+          voice_ivr_records.dst IS DISTINCT FROM EXCLUDED.dst OR
+          voice_ivr_records."statusType" IS DISTINCT FROM EXCLUDED."statusType" OR
+          voice_ivr_records.reason IS DISTINCT FROM EXCLUDED.reason OR
+          voice_ivr_records.task IS DISTINCT FROM EXCLUDED.task OR
+          voice_ivr_records."callDate" IS DISTINCT FROM EXCLUDED."callDate" OR
+          voice_ivr_records."sourceUrl" IS DISTINCT FROM EXCLUDED."sourceUrl" OR
+          voice_ivr_records."needsRefresh" IS DISTINCT FROM EXCLUDED."needsRefresh"`,
+      )
+      .returning(returning)
+      .execute();
+    raw.push(...((result.raw as any[]) ?? []));
+  }
+
+  if (withoutCallDate.length > 0) {
+    const result = await dataSource
+      .getRepository(VoiceIvrRecord)
+      .createQueryBuilder()
+      .insert()
+      .into(VoiceIvrRecord)
+      .values(withoutCallDate)
+      .orIgnore()
+      .returning(returning)
+      .execute();
+    raw.push(...((result.raw as any[]) ?? []));
+  }
+
+  return raw;
 }
 
 async function upsertCrawlState(

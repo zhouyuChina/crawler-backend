@@ -46,7 +46,7 @@ describe('voiceOpStrategy', () => {
     const result = voiceOpStrategy.parse(html);
     expect(result.rows).toHaveLength(2);
     expect(result.rows[0]).toMatchObject({
-      task: '',
+      task: null,
       src: '186000',
       dst: '0401433393',
       agent: '(186102)',

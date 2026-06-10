@@ -36,6 +36,7 @@ export function buildTaskKeys(contents: CrawlContent[]): TaskKey[] {
 
   if (contents.includes('voiceRecords')) {
     keys.add('cc_voiceivr');
+    keys.add('cc_voiceivr_initial_refresh');
   }
 
   if (contents.includes('manualRecords')) {

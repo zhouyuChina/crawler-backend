@@ -65,6 +65,18 @@ const MEMORY_DANGER_HEAP_RATIO = 0.85;
 const MAX_VOICE_TABLE_HTML_BYTES = 2 * 1024 * 1024;
 /** worker 子进程默认超时（毫秒），超时则 kill */
 const DEFAULT_WORKER_TIMEOUT_MS = 5 * 60 * 1000;
+/** IVR 初始状态后续会变化，需要进入补偿刷新 */
+const IVR_INITIAL_STATUS_TYPE = '初始狀態';
+/** 初始状态首次延迟刷新，避免立刻请求大概率仍未出结果 */
+const IVR_INITIAL_REFRESH_DELAY_MS = 2 * 60 * 1000;
+/** 初始状态最多跟踪 1 小时，避免无限追请求 */
+const IVR_INITIAL_REFRESH_TTL_MS = 60 * 60 * 1000;
+/** 每轮最多处理的 distinct dst 数 */
+const IVR_INITIAL_REFRESH_BATCH_SIZE = 50;
+/** 初始状态补偿请求并发 */
+const IVR_INITIAL_REFRESH_CONCURRENCY = 3;
+/** OP 页数较小，直接全量扫以持续修正后变状态 */
+const VOICE_OP_FULL_SCAN_MAX_PAGES = 100;
 
 type Headers = Record<string, string>;
 
@@ -107,6 +119,8 @@ export class VoiceTableService {
   private activeMap = new Map<string, boolean>();
   /** key: `${crmKey}:${module}:${mid}` -> true when history batch is running */
   private historyActiveMap = new Map<string, boolean>();
+  /** key: `${crmKey}:${mid}:${dst}` -> true when initial-status refresh is running */
+  private initialRefreshActiveKeys = new Set<string>();
 
   constructor(
     @InjectRepository(VoiceIvrRecord)
@@ -214,7 +228,26 @@ export class VoiceTableService {
       newTotalPages,
     );
 
-    if (needsDailyBackfill) {
+    if (
+      strategy.module === 'voice_op' &&
+      newTotalPages <= VOICE_OP_FULL_SCAN_MAX_PAGES
+    ) {
+      pagesToFetch = newTotalPages;
+      pageRanges =
+        pagesToFetch >= 2
+          ? [
+              {
+                start: 2,
+                end: pagesToFetch,
+                label: 'OP 全量更新',
+                updateCheckpoint: true,
+              },
+            ]
+          : [];
+      this.logger.log(
+        `OP 小页量全量更新 ${key}: pages=${pagesToFetch}/${newTotalPages}`,
+      );
+    } else if (needsDailyBackfill) {
       shouldBackfillHistory = true;
       const tailAnchorKeys =
         strategy.module === 'voice_ivr'
@@ -544,6 +577,85 @@ export class VoiceTableService {
       totalPages: newTotalPages,
       pagesToFetch,
     };
+  }
+
+  async refreshInitialIvrRecords(input: {
+    crmKey?: string;
+    url: string;
+    headers?: Headers | Array<{ name: string; value: string }>;
+  }): Promise<{ success: boolean; processed: number; message?: string }> {
+    const strategy = resolveStrategy(input.url);
+    if (!strategy || strategy.module !== 'voice_ivr') {
+      return { success: false, processed: 0, message: 'unsupported ivr url' };
+    }
+    const mid = extractMid(input.url);
+    if (mid == null) {
+      return { success: false, processed: 0, message: 'mid query param missing' };
+    }
+
+    const crmKey = this.normalizeCrmKey(input.crmKey ?? input.url);
+    const headers = this.normalizeHeaders(input.headers);
+    const expired = await this.ivrRecordRepo
+      .createQueryBuilder()
+      .update(VoiceIvrRecord)
+      .set({
+        needsRefresh: false,
+        refreshAfter: null,
+      })
+      .where('"crmKey" = :crmKey', { crmKey })
+      .andWhere('mid = :mid', { mid })
+      .andWhere('"needsRefresh" = TRUE')
+      .andWhere('"refreshUntil" IS NOT NULL')
+      .andWhere('"refreshUntil" < NOW()')
+      .execute();
+    if ((expired.affected ?? 0) > 0) {
+      this.logger.log(
+        `IVR 初始状态刷新过期 ${crmKey}:voice_ivr:${mid}: ${expired.affected}`,
+      );
+    }
+
+    const due = await this.ivrRecordRepo.query(
+      `
+      SELECT "crmKey", mid, dst, COUNT(*)::int AS count
+      FROM voice_ivr_records
+      WHERE "crmKey" = $1
+        AND mid = $2
+        AND "needsRefresh" = TRUE
+        AND dst IS NOT NULL
+        AND "callDate" IS NOT NULL
+        AND ("refreshAfter" IS NULL OR "refreshAfter" <= NOW())
+        AND ("refreshUntil" IS NULL OR "refreshUntil" >= NOW())
+      GROUP BY "crmKey", mid, dst
+      ORDER BY MIN("refreshAfter") NULLS FIRST
+      LIMIT $3
+      `,
+      [crmKey, mid, IVR_INITIAL_REFRESH_BATCH_SIZE],
+    );
+
+    const targets = due.filter(
+      (row: { dst: string }) =>
+        !this.initialRefreshActiveKeys.has(`${crmKey}:${mid}:${row.dst}`),
+    );
+    if (targets.length === 0) return { success: true, processed: 0 };
+
+    for (let i = 0; i < targets.length; i += IVR_INITIAL_REFRESH_CONCURRENCY) {
+      const batch = targets.slice(i, i + IVR_INITIAL_REFRESH_CONCURRENCY);
+      await Promise.all(
+        batch.map((row: { dst: string; count: number }) =>
+          this.refreshInitialIvrDst({
+            strategy,
+            crmKey,
+            mid,
+            baseUrl: input.url,
+            headers,
+            dst: row.dst,
+            pendingCount: row.count,
+          }),
+        ),
+      );
+    }
+
+    return { success: true, processed: targets.length };
   }
 
   // ============================ 内部 ============================
@@ -1145,6 +1257,80 @@ export class VoiceTableService {
       : DEFAULT_WORKER_TIMEOUT_MS;
   }
 
+  private async refreshInitialIvrDst(args: {
+    strategy: VoiceTableStrategy;
+    crmKey: string;
+    mid: number;
+    baseUrl: string;
+    headers: Headers;
+    dst: string;
+    pendingCount: number;
+  }): Promise<void> {
+    const key = `${args.crmKey}:${args.mid}:${args.dst}`;
+    if (this.initialRefreshActiveKeys.has(key)) return;
+    this.initialRefreshActiveKeys.add(key);
+    try {
+      const url = this.buildIvrDstSearchUrl(args.baseUrl, args.dst);
+      const html = await this.fetchHtmlWithRetry(url, args.headers);
+      const parsed = args.strategy.parse(html);
+      const rows = (parsed.rows as ParsedRowVoiceIvr[]).filter(
+        (row) => row.dst === args.dst,
+      );
+      const changed = await this.persistRows(
+        args.strategy.module,
+        args.crmKey,
+        args.mid,
+        url,
+        rows,
+      );
+      await this.bumpInitialRefreshAttempts(args.crmKey, args.mid, args.dst);
+      this.logger.log(
+        `IVR 初始状态补偿 ${args.crmKey}:voice_ivr:${args.mid} dst=${args.dst} pending=${args.pendingCount} rows=${rows.length} changed=${changed.length}`,
+      );
+    } catch (err: any) {
+      await this.bumpInitialRefreshAttempts(args.crmKey, args.mid, args.dst);
+      this.logger.warn(
+        `IVR 初始状态补偿失败 ${args.crmKey}:voice_ivr:${args.mid} dst=${args.dst}: ${err.message}`,
+      );
+    } finally {
+      this.initialRefreshActiveKeys.delete(key);
+    }
+  }
+
+  private buildIvrDstSearchUrl(baseUrl: string, dst: string): string {
+    const url = new URL(baseUrl);
+    url.pathname = '/modules/cc_voiceivr/';
+    url.searchParams.delete('pageID');
+    url.searchParams.set('ft[name]', dst);
+    url.searchParams.set('ft[disposition]', '0');
+    return url.toString();
+  }
+
+  private async bumpInitialRefreshAttempts(
+    crmKey: string,
+    mid: number,
+    dst: string,
+  ): Promise<void> {
+    await this.ivrRecordRepo.query(
+      `
+      UPDATE voice_ivr_records
+      SET "refreshAttempts" = "refreshAttempts" + 1,
+          "lastRefreshAt" = NOW(),
+          "refreshAfter" = CASE
+            WHEN "refreshAttempts" < 2 THEN NOW() + INTERVAL '2 minutes'
+            WHEN "refreshAttempts" < 4 THEN NOW() + INTERVAL '5 minutes'
+            ELSE NOW() + INTERVAL '10 minutes'
+          END
+      WHERE "crmKey" = $1
+        AND mid = $2
+        AND dst = $3
+        AND "needsRefresh" = TRUE
+        AND ("refreshUntil" IS NULL OR "refreshUntil" >= NOW())
+      `,
+      [crmKey, mid, dst],
+    );
+  }
+
   private async crawlPage(args: {
     strategy: VoiceTableStrategy;
     crmKey: string;
@@ -1489,7 +1675,9 @@ export class VoiceTableService {
 
     if (module === 'voice_ivr') {
       const ivrRows = rows as ParsedRowVoiceIvr[];
+      const seenAt = new Date();
       const entities = ivrRows.map((r) => {
+        const needsRefresh = r.statusType === IVR_INITIAL_STATUS_TYPE;
         const e = new VoiceIvrRecord();
         e.id = uuidv4();
         e.crmKey = crmKey;
@@ -1502,26 +1690,19 @@ export class VoiceTableService {
         e.task = r.task;
         e.callDate = r.callDate;
         e.sourceUrl = sourceUrl;
+        e.needsRefresh = needsRefresh;
+        e.refreshAfter = needsRefresh
+          ? new Date(seenAt.getTime() + IVR_INITIAL_REFRESH_DELAY_MS)
+          : null;
+        e.refreshUntil = needsRefresh
+          ? new Date(seenAt.getTime() + IVR_INITIAL_REFRESH_TTL_MS)
+          : null;
+        e.refreshAttempts = 0;
+        e.lastRefreshAt = null;
+        e.lastSeenAt = seenAt;
         return e;
       });
-      const result = await this.ivrRecordRepo
-        .createQueryBuilder()
-        .insert()
-        .into(VoiceIvrRecord)
-        .values(entities)
-        .orIgnore()
-        .returning([
-          'id',
-          'crmKey',
-          'mid',
-          'recordId',
-          'src',
-          'dst',
-          'statusType',
-          'callDate',
-        ])
-        .execute();
-      return (result.raw as any[]) ?? [];
+      return this.upsertVoiceIvrRecords(entities);
     }
 
     const opRows = rows as ParsedRowVoiceOp[];
@@ -1546,6 +1727,89 @@ export class VoiceTableService {
     return this.upsertVoiceOpRecords(entities);
   }
 
+  private async upsertVoiceIvrRecords(
+    entities: VoiceIvrRecord[],
+  ): Promise<any[]> {
+    const returning = [
+      'id',
+      'crmKey',
+      'mid',
+      'recordId',
+      'src',
+      'dst',
+      'statusType',
+      'callDate',
+      'needsRefresh',
+    ];
+    const rowsWithCallDate = entities.filter((e) => e.callDate != null);
+    const rowsWithoutCallDate = entities.filter((e) => e.callDate == null);
+    const raw: any[] = [];
+
+    if (rowsWithCallDate.length > 0) {
+      const result = await this.ivrRecordRepo
+        .createQueryBuilder()
+        .insert()
+        .into(VoiceIvrRecord)
+        .values(rowsWithCallDate)
+        .onConflict(
+          `("crmKey", "recordId", ("callDate"::date)) WHERE "callDate" IS NOT NULL DO UPDATE SET
+            mid = EXCLUDED.mid,
+            src = EXCLUDED.src,
+            dst = EXCLUDED.dst,
+            "statusType" = EXCLUDED."statusType",
+            reason = EXCLUDED.reason,
+            task = EXCLUDED.task,
+            "callDate" = EXCLUDED."callDate",
+            "sourceUrl" = EXCLUDED."sourceUrl",
+            "needsRefresh" = EXCLUDED."needsRefresh",
+            "refreshAfter" = CASE
+              WHEN EXCLUDED."needsRefresh" THEN COALESCE(voice_ivr_records."refreshAfter", EXCLUDED."refreshAfter")
+              ELSE NULL
+            END,
+            "refreshUntil" = CASE
+              WHEN EXCLUDED."needsRefresh" THEN COALESCE(voice_ivr_records."refreshUntil", EXCLUDED."refreshUntil")
+              ELSE NULL
+            END,
+            "refreshAttempts" = CASE
+              WHEN EXCLUDED."needsRefresh" THEN voice_ivr_records."refreshAttempts"
+              ELSE 0
+            END,
+            "lastRefreshAt" = CASE
+              WHEN EXCLUDED."needsRefresh" THEN voice_ivr_records."lastRefreshAt"
+              ELSE NULL
+            END,
+            "lastSeenAt" = EXCLUDED."lastSeenAt"
+          WHERE
+            voice_ivr_records.mid IS DISTINCT FROM EXCLUDED.mid OR
+            voice_ivr_records.src IS DISTINCT FROM EXCLUDED.src OR
+            voice_ivr_records.dst IS DISTINCT FROM EXCLUDED.dst OR
+            voice_ivr_records."statusType" IS DISTINCT FROM EXCLUDED."statusType" OR
+            voice_ivr_records.reason IS DISTINCT FROM EXCLUDED.reason OR
+            voice_ivr_records.task IS DISTINCT FROM EXCLUDED.task OR
+            voice_ivr_records."callDate" IS DISTINCT FROM EXCLUDED."callDate" OR
+            voice_ivr_records."sourceUrl" IS DISTINCT FROM EXCLUDED."sourceUrl" OR
+            voice_ivr_records."needsRefresh" IS DISTINCT FROM EXCLUDED."needsRefresh"`,
+        )
+        .returning(returning)
+        .execute();
+      raw.push(...((result.raw as any[]) ?? []));
+    }
+
+    if (rowsWithoutCallDate.length > 0) {
+      const result = await this.ivrRecordRepo
+        .createQueryBuilder()
+        .insert()
+        .into(VoiceIvrRecord)
+        .values(rowsWithoutCallDate)
+        .orIgnore()
+        .returning(returning)
+        .execute();
+      raw.push(...((result.raw as any[]) ?? []));
+    }
+
+    return raw;
+  }
+
   private async upsertVoiceOpRecords(entities: VoiceOpRecord[]): Promise<any[]> {
     const result = await this.opRecordRepo
       .createQueryBuilder()
@@ -1553,7 +1817,8 @@ export class VoiceTableService {
       .into(VoiceOpRecord)
       .values(entities)
       .onConflict(
-        `("crmKey", mid, src, dst, ("callDate"::date)) WHERE "callDate" IS NOT NULL DO UPDATE SET
+        `("crmKey", src, dst, ("callDate"::date)) WHERE "callDate" IS NOT NULL DO UPDATE SET
+          mid = EXCLUDED.mid,
           "recordKey" = EXCLUDED."recordKey",
           task = EXCLUDED.task,
           agent = EXCLUDED.agent,
@@ -1563,8 +1828,10 @@ export class VoiceTableService {
           "endDate" = EXCLUDED."endDate",
           "sourceUrl" = EXCLUDED."sourceUrl"
         WHERE
-          voice_op_records."recordKey" IS DISTINCT FROM EXCLUDED."recordKey"
+          voice_op_records.mid IS DISTINCT FROM EXCLUDED.mid
+          OR voice_op_records."recordKey" IS DISTINCT FROM EXCLUDED."recordKey"
           OR voice_op_records.task IS DISTINCT FROM EXCLUDED.task
+          OR voice_op_records.src IS DISTINCT FROM EXCLUDED.src
           OR voice_op_records.agent IS DISTINCT FROM EXCLUDED.agent
           OR voice_op_records.reason IS DISTINCT FROM EXCLUDED.reason
           OR voice_op_records.duration IS DISTINCT FROM EXCLUDED.duration
