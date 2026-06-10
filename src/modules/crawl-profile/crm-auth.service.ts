@@ -219,8 +219,9 @@ export class CrmAuthService implements OnModuleInit {
     this.logger.log(`开始登录 ${baseUrl} 账号=${username}`);
 
     try {
-      // Step 1: GET 登录页，获取 verify_key 和初始 Cookie
-      const getResult = await this.httpGet(`${baseUrl}/login.php`);
+      // Step 1: GET 登录页，获取 verify_key 和初始 Cookie（部分 CRM 在 /，部分在 /login.php）
+      const { page: loginPageUrl, result: getResult } =
+        await this.fetchLoginPage(baseUrl);
 
       // 检测是否跳转到真人校验页
       if (
@@ -237,16 +238,18 @@ export class CrmAuthService implements OnModuleInit {
 
       const verifyKey = this.extractVerifyKey(getResult.body);
       if (!verifyKey) {
-        this.logger.warn(`登录页未提取到 verify_key ${baseUrl} 账号=${username}`);
+        this.logger.warn(
+          `登录页未提取到 verify_key ${loginPageUrl} 账号=${username}`,
+        );
       }
       const initialCookies = getResult.setCookies;
 
-      // Step 2: POST 登录
+      // Step 2: POST 登录（字段与浏览器表单一致：done=submit_log, submit=GO...）
       const postBody = new URLSearchParams({
         username,
         password,
-        done: '',
-        submit: '登录',
+        done: 'submit_log',
+        submit: 'GO...',
         ...(verifyKey ? { verify_key: verifyKey } : {}),
       }).toString();
 
@@ -256,7 +259,7 @@ export class CrmAuthService implements OnModuleInit {
         postBody,
         {
           'Content-Type': 'application/x-www-form-urlencoded',
-          Referer: `${baseUrl}/login.php`,
+          Referer: loginPageUrl,
           ...(cookieHeader ? { Cookie: cookieHeader } : {}),
         },
       );
@@ -335,6 +338,31 @@ export class CrmAuthService implements OnModuleInit {
       /403\s*FORBIDDEN/i.test(s) ||
       (/login\.php/i.test(s) && /password|verify_key/i.test(s))
     );
+  }
+
+  /** 依次尝试 / 与 /login.php，返回可用登录页 URL 及响应 */
+  private async fetchLoginPage(baseUrl: string): Promise<{
+    page: string;
+    result: {
+      statusCode: number;
+      body: string;
+      setCookies: string[];
+      finalUrl?: string;
+    };
+  }> {
+    const candidates = [`${baseUrl}/`, `${baseUrl}/login.php`];
+    let fallback: { page: string; result: Awaited<ReturnType<typeof this.httpGet>> } | null =
+      null;
+    for (const page of candidates) {
+      const result = await this.httpGet(page);
+      if (result.statusCode === 200 && this.extractVerifyKey(result.body)) {
+        return { page, result };
+      }
+      if (result.statusCode === 200 && !fallback) {
+        fallback = { page, result };
+      }
+    }
+    return fallback ?? { page: candidates[0], result: await this.httpGet(candidates[0]) };
   }
 
   private extractVerifyKey(html: string): string | null {
@@ -505,7 +533,9 @@ export class CrmAuthService implements OnModuleInit {
         ) {
           const finalUrl = location.startsWith('http')
             ? location
-            : `${parsed.protocol}//${parsed.host}${location}`;
+            : `${parsed.protocol}//${parsed.host}${
+                location.startsWith('/') ? '' : '/'
+              }${location}`;
           resolve({
             statusCode: res.statusCode,
             body: '',
