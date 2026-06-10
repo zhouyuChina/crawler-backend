@@ -207,6 +207,12 @@ export class VoiceTableService {
     const businessDate = this.getBusinessDate(strategy.module, firstParsed.rows);
     const needsDailyBackfill =
       businessDate != null && crawlState?.initialCompletedDate !== businessDate;
+    const needsHistoryCatchup = this.needsIvrHistoryCatchup(
+      strategy.module,
+      crawlState,
+      businessDate,
+      newTotalPages,
+    );
 
     if (needsDailyBackfill) {
       shouldBackfillHistory = true;
@@ -409,10 +415,7 @@ export class VoiceTableService {
       await this.upsertCrawlState(crmKey, strategy.module, mid, {
         status: 'failed',
       });
-      if (
-        hasPendingHistory &&
-        newTotalPages > VOICE_TABLE_DAILY_MAX_PAGES
-      ) {
+      if (hasPendingHistory || needsHistoryCatchup) {
         void this.scheduleAndRunHistoryBatch({
           strategy,
           crmKey,
@@ -421,9 +424,15 @@ export class VoiceTableService {
           headers,
           key,
           totalPagesRef: newTotalPages,
-          nextPage: pagesToFetch + 1,
+          nextPage: this.resolveIvrHistoryStartPage(
+            crawlState,
+            pagesToFetch,
+            newTotalPages,
+            businessDate,
+          ),
           businessDate: businessDate ?? undefined,
-          resetHistoryCursor: shouldBackfillHistory,
+          resetHistoryCursor:
+            shouldBackfillHistory || (needsHistoryCatchup && !hasPendingHistory),
         }).catch((err) =>
           this.logger.error(`历史补全调度失败 ${key}: ${err.message}`),
         );
@@ -466,11 +475,10 @@ export class VoiceTableService {
         })
         .finally(() => {
           this.activeMap.delete(key);
-          // 日常锚点扫描触碰上限且未命中尾页锚点，调度历史补全批次
+          // 日常扫描结束后，若当日历史补全未完成则继续调度
           if (
             !runResult.anchorFound &&
-            newTotalPages > VOICE_TABLE_DAILY_MAX_PAGES &&
-            (shouldBackfillHistory || hasPendingHistory)
+            (shouldBackfillHistory || hasPendingHistory || needsHistoryCatchup)
           ) {
             void this.scheduleAndRunHistoryBatch({
               strategy,
@@ -480,9 +488,15 @@ export class VoiceTableService {
               headers,
               key,
               totalPagesRef: newTotalPages,
-              nextPage: pagesToFetch + 1,
+              nextPage: this.resolveIvrHistoryStartPage(
+                crawlState,
+                pagesToFetch,
+                newTotalPages,
+                businessDate,
+              ),
               businessDate: businessDate ?? undefined,
-              resetHistoryCursor: shouldBackfillHistory,
+              resetHistoryCursor:
+                shouldBackfillHistory || (needsHistoryCatchup && !hasPendingHistory),
             }).catch((err) =>
               this.logger.error(`历史补全调度失败 ${key}: ${err.message}`),
             );
@@ -498,10 +512,7 @@ export class VoiceTableService {
           ? businessDate
           : crawlState?.initialCompletedDate,
       });
-      if (
-        hasPendingHistory &&
-        newTotalPages > VOICE_TABLE_DAILY_MAX_PAGES
-      ) {
+      if (hasPendingHistory || needsHistoryCatchup) {
         void this.scheduleAndRunHistoryBatch({
           strategy,
           crmKey,
@@ -510,9 +521,15 @@ export class VoiceTableService {
           headers,
           key,
           totalPagesRef: newTotalPages,
-          nextPage: pagesToFetch + 1,
+          nextPage: this.resolveIvrHistoryStartPage(
+            crawlState,
+            pagesToFetch,
+            newTotalPages,
+            businessDate,
+          ),
           businessDate: businessDate ?? undefined,
-          resetHistoryCursor: needsDailyBackfill,
+          resetHistoryCursor:
+            needsDailyBackfill || (needsHistoryCatchup && !hasPendingHistory),
         }).catch((err) =>
           this.logger.error(`历史补全调度失败 ${key}: ${err.message}`),
         );
@@ -1239,6 +1256,47 @@ export class VoiceTableService {
       if (key && anchorKeys.has(key)) return true;
     }
     return false;
+  }
+
+  private needsIvrHistoryCatchup(
+    module: VoiceModule,
+    crawlState: VoiceCrawlState | null | undefined,
+    businessDate: string | null,
+    totalPages: number,
+  ): boolean {
+    if (module !== 'voice_ivr') return false;
+    if (!businessDate || totalPages <= VOICE_TABLE_DAILY_MAX_PAGES) return false;
+    if (
+      crawlState?.historyStatus === 'completed' &&
+      crawlState.initialCompletedDate === businessDate
+    ) {
+      if (totalPages > (crawlState.totalPages ?? 0)) return true;
+      return false;
+    }
+    return true;
+  }
+
+  private resolveIvrHistoryStartPage(
+    crawlState: VoiceCrawlState | null | undefined,
+    pagesToFetch: number,
+    totalPages: number,
+    businessDate: string | null,
+  ): number {
+    const sameDayReopen =
+      businessDate &&
+      crawlState?.historyStatus === 'completed' &&
+      crawlState.initialCompletedDate === businessDate &&
+      totalPages > (crawlState.totalPages ?? 0);
+    if (sameDayReopen) return VOICE_TABLE_DAILY_MAX_PAGES + 1;
+
+    const fromDaily = pagesToFetch + 1;
+    const fromPending = crawlState?.historyNextPage ?? 0;
+    const fromLegacy =
+      crawlState?.lastCompletedPage &&
+      crawlState.lastCompletedPage > VOICE_TABLE_DAILY_MAX_PAGES
+        ? crawlState.lastCompletedPage + 1
+        : 0;
+    return Math.max(fromDaily, fromPending, fromLegacy);
   }
 
   private getBusinessDate(
@@ -2031,7 +2089,10 @@ export class VoiceTableService {
     }
 
     // 批次结束：更新游标
-    const isDone = anchorFoundInBatch || checkpointPage >= currentTotalPages;
+    const isDone =
+      checkpointPage >= currentTotalPages ||
+      (anchorFoundInBatch &&
+        checkpointPage >= currentTotalPages - IVR_TAIL_ANCHOR_PAGES);
     const nextHistoryPage = isDone
       ? null
       : Math.max(adjustedStart, checkpointPage + 1);

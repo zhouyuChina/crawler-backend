@@ -52,6 +52,23 @@ function sliceToListDiv(html: string): string {
   return html.slice(start, tableEnd + 8) + '</div>';
 }
 
+const CALL_DATE_RE = /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/;
+
+function extractIvrCallDate(
+  $tds: { length: number; eq: (i: number) => { text: () => string } },
+  td: (i: number) => string,
+): Date | null {
+  for (const idx of [6, 5, 7]) {
+    const parsed = parseDateTime(td(idx));
+    if (parsed) return parsed;
+  }
+  for (let i = $tds.length - 2; i >= 3; i--) {
+    const text = td(i);
+    if (CALL_DATE_RE.test(text)) return parseDateTime(text);
+  }
+  return null;
+}
+
 function extractIvrRows(html: string): ParsedRowVoiceIvr[] {
   const fragment = sliceToListDiv(html);
   const $ = cheerio.load(fragment);
@@ -70,6 +87,7 @@ function extractIvrRows(html: string): ParsedRowVoiceIvr[] {
     const td = (i: number) => cleanText($tds.eq(i).text());
 
     // 0:checkbox 1:src 2:dst 3:statusType 4:reason 5:task 6:callDate 7:操作
+    // 部分 CRM 把「終止原因」嵌在狀態列，直接子 td 会少一列，callDate 可能在 index 5
     rows.push({
       recordId,
       src: td(1) || null,
@@ -77,7 +95,7 @@ function extractIvrRows(html: string): ParsedRowVoiceIvr[] {
       statusType: td(3) || null,
       reason: td(4) || null,
       task: td(5) || null,
-      callDate: parseDateTime(td(6)),
+      callDate: extractIvrCallDate($tds, td),
     });
   });
 

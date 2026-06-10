@@ -37,6 +37,8 @@ const RESUME_OVERLAP_PAGES = 2;
 const VOICE_TABLE_DAILY_MAX_PAGES = 10;
 /** 历史补全每批抓取页数 */
 const HISTORY_BATCH_SIZE = 50;
+/** IVR 尾页锚点检测范围：与主进程一致 */
+const IVR_TAIL_ANCHOR_PAGES = 2;
 
 type Headers = Record<string, string>;
 
@@ -221,7 +223,11 @@ async function runHistoryBatch(
     };
   }
 
-  const isDone = batchResult.anchorFound || batchResult.highestCompletedPage >= currentTotalPages;
+  const isDone =
+    batchResult.highestCompletedPage >= currentTotalPages ||
+    (batchResult.anchorFound &&
+      batchResult.highestCompletedPage >=
+        currentTotalPages - IVR_TAIL_ANCHOR_PAGES);
   await upsertCrawlState(dataSource, payload.crmKey, strategy.module, payload.mid, {
     historyStatus: isDone ? 'completed' : 'pending',
     historyNextPage: isDone ? null : batchResult.highestCompletedPage + 1,
@@ -238,6 +244,84 @@ async function runHistoryBatch(
     pagesToFetch: batchEnd,
     hasMoreHistory: !isDone,
   };
+}
+
+function needsIvrHistoryCatchup(
+  module: VoiceModule,
+  crawlState: VoiceCrawlState | null | undefined,
+  businessDate: string | null,
+  totalPages: number,
+): boolean {
+  if (module !== 'voice_ivr') return false;
+  if (!businessDate || totalPages <= VOICE_TABLE_DAILY_MAX_PAGES) return false;
+  if (
+    crawlState?.historyStatus === 'completed' &&
+    crawlState.initialCompletedDate === businessDate
+  ) {
+    // 同天总页数上涨：新数据被挤到第 11 页之后，需重开历史补全
+    if (totalPages > (crawlState.totalPages ?? 0)) return true;
+    return false;
+  }
+  return true;
+}
+
+function resolveIvrHistoryStartPage(
+  crawlState: VoiceCrawlState | null | undefined,
+  pagesToFetch: number,
+  totalPages: number,
+  businessDate: string | null,
+): number {
+  const sameDayReopen =
+    businessDate &&
+    crawlState?.historyStatus === 'completed' &&
+    crawlState.initialCompletedDate === businessDate &&
+    totalPages > (crawlState.totalPages ?? 0);
+  if (sameDayReopen) return VOICE_TABLE_DAILY_MAX_PAGES + 1;
+
+  const fromDaily = pagesToFetch + 1;
+  const fromPending = crawlState?.historyNextPage ?? 0;
+  const fromLegacy =
+    crawlState?.lastCompletedPage &&
+    crawlState.lastCompletedPage > VOICE_TABLE_DAILY_MAX_PAGES
+      ? crawlState.lastCompletedPage + 1
+      : 0;
+  return Math.max(fromDaily, fromPending, fromLegacy);
+}
+
+async function markIvrHistoryPending(
+  dataSource: DataSource,
+  payload: WorkerPayload,
+  crawlState: VoiceCrawlState | null | undefined,
+  args: {
+    totalPages: number;
+    pagesToFetch: number;
+    businessDate?: string | null;
+    hasPendingHistory: boolean;
+    needsDailyBackfill: boolean;
+    needsHistoryCatchup: boolean;
+  },
+): Promise<void> {
+  const preserveCursor =
+    args.hasPendingHistory && !args.needsDailyBackfill && !args.needsHistoryCatchup;
+  const historyUpdate: Partial<VoiceCrawlState> = {
+    historyStatus: 'pending',
+  };
+  if (!preserveCursor) {
+    historyUpdate.historyNextPage = resolveIvrHistoryStartPage(
+      crawlState,
+      args.pagesToFetch,
+      args.totalPages,
+      args.businessDate ?? null,
+    );
+    historyUpdate.historyTotalPagesRef = args.totalPages;
+  }
+  await upsertCrawlState(
+    dataSource,
+    payload.crmKey,
+    payload.module!,
+    payload.mid,
+    historyUpdate,
+  );
 }
 
 async function runStartCrawl(
@@ -370,6 +454,13 @@ async function runStartCrawl(
     ...(needsDailyBackfill && businessDate ? { initialCompletedDate: businessDate } : {}),
   });
 
+  const needsHistoryCatchup = needsIvrHistoryCatchup(
+    strategy.module,
+    crawlState,
+    businessDate,
+    totalPages,
+  );
+
   if (pageRanges.length === 0) {
     await upsertCrawlState(dataSource, payload.crmKey, strategy.module, payload.mid, {
       totalPages,
@@ -377,6 +468,19 @@ async function runStartCrawl(
       lastCompletedPage: pagesToFetch,
       initialCompletedDate: needsDailyBackfill ? businessDate : crawlState?.initialCompletedDate,
     });
+    if (needsHistoryCatchup) {
+      await markIvrHistoryPending(dataSource, payload, crawlState, {
+        totalPages,
+        pagesToFetch,
+        businessDate,
+        hasPendingHistory,
+        needsDailyBackfill,
+        needsHistoryCatchup,
+      });
+      logWorker(
+        `start schedule-history module=${strategy.module} mid=${payload.mid} next=${resolveIvrHistoryStartPage(crawlState, pagesToFetch, totalPages, businessDate)}/${totalPages}`,
+      );
+    }
     return {
       success: true,
       highestCompletedPage: pagesToFetch,
@@ -388,6 +492,7 @@ async function runStartCrawl(
       mid: payload.mid,
       totalPages,
       pagesToFetch,
+      hasMoreHistory: needsHistoryCatchup || hasPendingHistory,
     };
   }
 
@@ -402,21 +507,21 @@ async function runStartCrawl(
   } as Required<WorkerPayload>);
 
   const shouldScheduleHistory =
+    needsHistoryCatchup &&
     batchResult.success &&
-    !batchResult.anchorFound &&
-    totalPages > VOICE_TABLE_DAILY_MAX_PAGES &&
-    batchResult.highestCompletedPage < totalPages &&
-    shouldBackfillHistory;
+    !batchResult.anchorFound;
   if (shouldScheduleHistory) {
-    const historyUpdate: Partial<VoiceCrawlState> = {
-      historyStatus: 'pending',
-    };
-    // 重启恢复时保留已有历史游标，避免把 3051 之类的断点重置成 dailyCap + 1。
-    if (!hasPendingHistory || needsDailyBackfill) {
-      historyUpdate.historyNextPage = pagesToFetch + 1;
-      historyUpdate.historyTotalPagesRef = totalPages;
-    }
-    await upsertCrawlState(dataSource, payload.crmKey, strategy.module, payload.mid, historyUpdate);
+    await markIvrHistoryPending(dataSource, payload, crawlState, {
+      totalPages,
+      pagesToFetch,
+      businessDate,
+      hasPendingHistory,
+      needsDailyBackfill,
+      needsHistoryCatchup,
+    });
+    logWorker(
+      `start schedule-history module=${strategy.module} mid=${payload.mid} next=${resolveIvrHistoryStartPage(crawlState, pagesToFetch, totalPages, businessDate)}/${totalPages}`,
+    );
   }
 
   return {
@@ -425,6 +530,8 @@ async function runStartCrawl(
     mid: payload.mid,
     totalPages,
     pagesToFetch,
+    hasMoreHistory:
+      shouldScheduleHistory || hasPendingHistory || Boolean(batchResult.hasMoreHistory),
   };
 }
 

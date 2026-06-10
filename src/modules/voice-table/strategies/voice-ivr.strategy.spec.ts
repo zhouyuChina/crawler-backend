@@ -63,6 +63,19 @@ describe('voiceIvrStrategy', () => {
     expect(url).toBe('http://x/?mid=24&pageID=5');
   });
 
+  it('parses callDate when reason is nested inside status column', () => {
+    const nestedHtml = `<html><body><div id="listDiv"><table><tr>
+      <td class="first-cell"><input type="checkbox" name="checkboxes[]" value="96029">&nbsp;1</td>
+      <td>186000</td><td>0433274378</td>
+      <td align="center">通話狀態<td align='center'><font color='green'>語音通話</font></td></td>
+      <td align="center"></td>
+      <td align="center">2026-06-10 14:04:43</td>
+      <td align="center"><a href="javascript:delete_voicecallee('96029')">刪除</a></td>
+    </tr></table></div></body></html>`;
+    const result = voiceIvrStrategy.parse(nestedHtml);
+    expect(result.rows[0].callDate?.toISOString()).toContain('2026-06-10');
+  });
+
   it('parses 8-column row: 狀態/終止原因/任務/呼叫時間', () => {
     const html = `<html><body><div id="listDiv"><table><tr>
       <td class="first-cell"><input type="checkbox" name="checkboxes[]" value="217082">&nbsp;1</td>
