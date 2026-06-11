@@ -3,6 +3,8 @@ import { PluginDataService } from '../plugin-data/plugin-data.service';
 import { VoiceTableService } from '../voice-table/voice-table.service';
 import { CrawlProfile } from './crawl-profile.entity';
 import { CrmAuthService } from './crm-auth.service';
+import * as http from 'http';
+import * as https from 'https';
 
 export type TaskKey =
   | 'get_peer_status'
@@ -20,6 +22,11 @@ interface TaskDef {
   buildUrl: (profile: CrawlProfile) => string;
   isTable?: boolean;
 }
+
+type Headers = Record<string, string>;
+
+const SCHEDULER_REQUEST_TIMEOUT_MS = 30000;
+const SCHEDULER_RESPONSE_DRAIN_LIMIT_BYTES = 64 * 1024;
 
 const TASK_DEFS: Record<TaskKey, TaskDef> = {
   get_peer_status: {
@@ -155,14 +162,9 @@ export class CrmRequestRunnerService {
         this.crmAuthService.touchCookies(profile.id);
         this.logger.debug(`${profile.name}(${taskKey}): 表格抓取已触发`);
       } else {
-        const result = await this.pluginDataService.proxyRequest({
-          url,
-          method: 'GET',
-          headers,
-          sourcePluginId: 'crawl-profile-scheduler',
-        });
-        if ((result.statusCode ?? 0) >= 400) {
-          throw new Error(`HTTP ${result.statusCode}: ${url}`);
+        const statusCode = await this.runLightweightGet(url, headers);
+        if (statusCode >= 400) {
+          throw new Error(`HTTP ${statusCode}: ${url}`);
         }
         this.crmAuthService.touchCookies(profile.id);
         this.logger.debug(`${profile.name}(${taskKey}): 普通请求完成`);
@@ -185,5 +187,42 @@ export class CrmRequestRunnerService {
 
   getTaskDef(taskKey: TaskKey): TaskDef | undefined {
     return TASK_DEFS[taskKey];
+  }
+
+  private runLightweightGet(url: string, headers: Headers): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const parsed = new URL(url);
+      const isHttps = parsed.protocol === 'https:';
+      const client = isHttps ? https : http;
+      const req = client.request(
+        {
+          hostname: parsed.hostname,
+          port: parsed.port || (isHttps ? 443 : 80),
+          path: parsed.pathname + parsed.search,
+          method: 'GET',
+          headers,
+          timeout: SCHEDULER_REQUEST_TIMEOUT_MS,
+        },
+        (res) => {
+          let receivedBytes = 0;
+          res.on('data', (chunk: Buffer) => {
+            receivedBytes += chunk.length;
+            if (receivedBytes > SCHEDULER_RESPONSE_DRAIN_LIMIT_BYTES) {
+              req.destroy(
+                new Error(
+                  `scheduler response too large: ${receivedBytes} bytes`,
+                ),
+              );
+            }
+          });
+          res.on('end', () => resolve(res.statusCode || 0));
+        },
+      );
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy(new Error(`scheduler request timeout: ${url}`));
+      });
+      req.end();
+    });
   }
 }
