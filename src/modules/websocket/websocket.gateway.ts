@@ -302,4 +302,20 @@ export class WebsocketGateway
   }) {
     this.server.to(ROOM_TABLE_CRAWL).emit('table-crawl:progress', data);
   }
+
+  broadcastIvrExportChanged(data: {
+    crmKey: string;
+    mid: number;
+    disposition: string;
+    sourceDate: string;
+    lineCount: number;
+    previousLineCount: number | null;
+    filePath: string;
+    capturedAt: string;
+  }) {
+    this.server.to(ROOM_TABLE_CRAWL).emit('ivr-export:changed', data);
+    this.logger.log(
+      `广播 IVR 导出变化: ${data.crmKey} ${data.disposition} ${data.previousLineCount ?? '-'} -> ${data.lineCount}`,
+    );
+  }
 }

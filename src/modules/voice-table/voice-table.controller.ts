@@ -1,4 +1,4 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query } from '@nestjs/common';
 import { CrawlStartResult, VoiceTableService } from './voice-table.service';
 import { TableCrawlDto } from './dto/table-crawl.dto';
 
@@ -14,5 +14,13 @@ export class VoiceTableController {
       headers: dto.headers,
     });
     return result;
+  }
+
+  @Get('ivr-export-files')
+  async getIvrExportFiles(
+    @Query('crmKey') crmKey: string,
+    @Query('sourceDate') sourceDate?: string,
+  ) {
+    return this.service.getIvrExportFiles(crmKey, sourceDate);
   }
 }

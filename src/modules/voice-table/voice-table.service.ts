@@ -6,7 +6,7 @@ import * as https from 'https';
 import { fork } from 'child_process';
 import { existsSync } from 'fs';
 import { mkdir, writeFile } from 'fs/promises';
-import { dirname, join } from 'path';
+import { dirname, isAbsolute, join } from 'path';
 import { createHash } from 'crypto';
 import { getHeapStatistics } from 'v8';
 import { v4 as uuidv4 } from 'uuid';
@@ -642,6 +642,38 @@ export class VoiceTableService {
       connected,
       notConnected,
     };
+  }
+
+  async getIvrExportFiles(crmKeyInput: string, sourceDate?: string) {
+    const crmKey = this.normalizeCrmKey(crmKeyInput);
+    const where: { crmKey: string; sourceDate?: string } = { crmKey };
+    if (sourceDate) where.sourceDate = sourceDate;
+
+    const rows = await this.ivrExportFileRepo.find({
+      where,
+      order: {
+        sourceDate: 'DESC',
+        disposition: 'ASC',
+        capturedAt: 'DESC',
+      },
+    });
+
+    return rows.map((row) => ({
+      id: row.id,
+      crmKey: row.crmKey,
+      mid: row.mid,
+      disposition: row.disposition,
+      sourceDate: row.sourceDate,
+      lineCount: row.lineCount,
+      contentHash: row.contentHash,
+      filePath: row.filePath,
+      absoluteFilePath: isAbsolute(row.filePath)
+        ? row.filePath
+        : join(process.cwd(), row.filePath),
+      sourceUrl: row.sourceUrl,
+      capturedAt: row.capturedAt,
+      updatedAt: row.updatedAt,
+    }));
   }
 
   private async crawlIvrExportDisposition(args: {
@@ -2032,11 +2064,11 @@ export class VoiceTableService {
         sourceDate: args.sourceDate,
       },
     });
-
-    if (!existing || existing.contentHash !== contentHash || existing.filePath !== filePath) {
-      await mkdir(dirname(filePath), { recursive: true });
-      await writeFile(filePath, args.txt, 'utf8');
-    }
+    const previousLineCount = existing?.lineCount ?? null;
+    const lineCountChanged = previousLineCount !== args.lineCount;
+    const capturedAt = new Date();
+    await mkdir(dirname(filePath), { recursive: true });
+    await writeFile(filePath, args.txt, 'utf8');
 
     await this.ivrExportFileRepo
       .createQueryBuilder()
@@ -2052,7 +2084,7 @@ export class VoiceTableService {
         lineCount: args.lineCount,
         contentHash,
         sourceUrl: args.sourceUrl,
-        capturedAt: new Date(),
+        capturedAt,
       })
       .onConflict(
         `("crmKey", mid, disposition, "sourceDate") DO UPDATE SET
@@ -2064,6 +2096,19 @@ export class VoiceTableService {
           "updatedAt" = now()`,
       )
       .execute();
+
+    if (lineCountChanged) {
+      this.ws.broadcastIvrExportChanged({
+        crmKey: args.crmKey,
+        mid: args.mid,
+        disposition: args.disposition,
+        sourceDate: args.sourceDate,
+        lineCount: args.lineCount,
+        previousLineCount,
+        filePath,
+        capturedAt: capturedAt.toISOString(),
+      });
+    }
   }
 
   private async upsertVoiceOpRecords(entities: VoiceOpRecord[]): Promise<any[]> {
