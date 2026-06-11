@@ -45,6 +45,37 @@ export class CallRecordController {
     @Query('full') full?: string,
     @Query('sourceUrl') sourceUrl?: string,
   ) {
+    // 优先从内存快照（调度器轻量 GET 的缓存）返回，避免查 webpages 大表
+    if (sourceUrl?.trim()) {
+      const cached = this.callRecordService.getLatestRawBody(
+        sourceUrl.trim(),
+        recordType,
+      );
+      if (cached) {
+        return {
+          recordType,
+          sourceUrl: sourceUrl.trim(),
+          content: cached.rawBody,
+          capturedAt: cached.capturedAt,
+          source: 'memory',
+        };
+      }
+    } else {
+      const cached = this.callRecordService.getLatestRawBodyAcrossCrmKeys(
+        recordType,
+      );
+      if (cached) {
+        return {
+          recordType,
+          sourceUrl: cached.crmKey,
+          content: cached.rawBody,
+          capturedAt: cached.capturedAt,
+          source: 'memory',
+        };
+      }
+    }
+
+    // 内存无数据时回退到数据库查询（向后兼容）
     const record = await this.callRecordService.findLatestByType(recordType, {
       full: full === '1' || full === 'true',
       sourceUrl,

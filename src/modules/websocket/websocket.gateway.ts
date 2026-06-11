@@ -16,6 +16,14 @@ const ROOM_REQUEST_MONITOR = 'request-monitor';
 const ROOM_CALL_RECORDS = 'call-records';
 const ROOM_TABLE_CRAWL = 'table-crawl';
 
+/** 每 crmKey 房间前缀，e.g. "call-records:http://x.x.x.x:port" */
+const callRecordsRoom = (crmKey: string) => `call-records:${crmKey}`;
+
+interface CallRecordEntry {
+  rawBody: string;
+  capturedAt: string;
+}
+
 @WebSocketGateway({
   cors: {
     origin: true, // 允许所有来源（动态返回请求的 origin）
@@ -32,6 +40,13 @@ export class WebsocketGateway
   server: Server;
 
   private logger = new Logger('WebsocketGateway');
+
+  /**
+   * 按 "${crmKey}:${recordType}" 存储最新原始响应体，供订阅时推送快照。
+   * 该 Map 只保留每种类型的最新一条，内存上界 = crmKey 数 × recordType 数 × body 大小。
+   */
+  private readonly callRecordLatestMap = new Map<string, CallRecordEntry>();
+
   private readonly requestHistory: Array<{
     id: string;
     url: string;
@@ -93,19 +108,88 @@ export class WebsocketGateway
   }
 
   @SubscribeMessage('subscribe:call-records')
-  handleSubscribeCallRecords(@ConnectedSocket() client: Socket) {
+  handleSubscribeCallRecords(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { crmKey?: string; crmKeys?: string[] } | null,
+  ) {
     if (!client?.id) return { success: false };
-    this.logger.log(`Client ${client.id} subscribed to call records`);
-    client.join(ROOM_CALL_RECORDS);
+
+    const keys: string[] = [];
+    if (data?.crmKeys?.length) {
+      keys.push(...data.crmKeys);
+    } else if (data?.crmKey) {
+      keys.push(data.crmKey);
+    }
+
+    if (keys.length === 0) {
+      // 向后兼容：无 crmKey 时加入通用房间
+      client.join(ROOM_CALL_RECORDS);
+      this.logger.log(`Client ${client.id} subscribed to call-records (legacy room)`);
+      return { success: true };
+    }
+
+    for (const crmKey of keys) {
+      client.join(callRecordsRoom(crmKey));
+    }
+    this.logger.log(
+      `Client ${client.id} subscribed to call-records crmKeys=[${keys.join(',')}]`,
+    );
+
+    // 发送当前快照（所有已缓存的 recordType）
+    const snapshot: Record<string, Record<string, CallRecordEntry>> = {};
+    for (const crmKey of keys) {
+      snapshot[crmKey] = {};
+      for (const [k, v] of this.callRecordLatestMap.entries()) {
+        if (k.startsWith(`${crmKey}:`)) {
+          const recordType = k.slice(crmKey.length + 1);
+          snapshot[crmKey][recordType] = v;
+        }
+      }
+    }
+    client.emit('call-record:snapshot', snapshot);
+
     return { success: true };
   }
 
   @SubscribeMessage('unsubscribe:call-records')
-  handleUnsubscribeCallRecords(@ConnectedSocket() client: Socket) {
+  handleUnsubscribeCallRecords(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { crmKey?: string; crmKeys?: string[] } | null,
+  ) {
     if (!client?.id) return { success: false };
     this.logger.log(`Client ${client.id} unsubscribed from call records`);
-    client.leave(ROOM_CALL_RECORDS);
-    return { success: true };
+
+    const keys: string[] = [];
+    if (data?.crmKeys?.length) {
+      keys.push(...data.crmKeys);
+    } else if (data?.crmKey) {
+      keys.push(data.crmKey);
+    }
+
+    const leftRooms: string[] = [];
+
+    // 指定 crmKey 时只退这些房间；否则退所有 call-records:* 房间
+    if (keys.length > 0) {
+      for (const crmKey of keys) {
+        const room = callRecordsRoom(crmKey);
+        if (client.rooms.has(room)) {
+          client.leave(room);
+          leftRooms.push(room);
+        }
+      }
+    } else {
+      for (const room of client.rooms) {
+        if (room.startsWith(`${ROOM_CALL_RECORDS}:`)) {
+          client.leave(room);
+          leftRooms.push(room);
+        }
+      }
+    }
+    if (client.rooms.has(ROOM_CALL_RECORDS)) {
+      client.leave(ROOM_CALL_RECORDS);
+      leftRooms.push(ROOM_CALL_RECORDS);
+    }
+    return { success: true, leftRooms };
   }
 
   @SubscribeMessage('subscribe:table-crawl')
@@ -218,6 +302,7 @@ export class WebsocketGateway
     if (!sockets) {
       return {
         requestHistorySize: this.requestHistory.length,
+        callRecordLatestMapSize: this.callRecordLatestMap.size,
         socketCount,
         socketBufferedPackets,
       };
@@ -228,6 +313,7 @@ export class WebsocketGateway
     }
     return {
       requestHistorySize: this.requestHistory.length,
+      callRecordLatestMapSize: this.callRecordLatestMap.size,
       socketCount,
       socketBufferedPackets,
     };
@@ -361,5 +447,36 @@ export class WebsocketGateway
     this.logger.log(
       `广播 IVR 导出变化: ${data.crmKey} ${data.disposition} ${data.previousLineCount ?? '-'} -> ${data.lineCount}`,
     );
+  }
+
+  /**
+   * 更新内存快照并向对应 crmKey 房间推送实时通话记录。
+   * 由 CallRecordService.pushRawRecord 调用。
+   *
+   * @param crmKey  抓取来源，e.g. "http://x.x.x.x:port"
+   * @param recordType  任务类型，e.g. "get_curcall_in"
+   * @param rawBody  原始响应体（已限制 ≤ 64KB）
+   * @param changed  true 表示内容有变化，需要广播；false 只更新快照，不广播
+   */
+  updateAndBroadcastCallRecord(
+    crmKey: string,
+    recordType: string,
+    rawBody: string,
+    changed: boolean,
+  ) {
+    const capturedAt = new Date().toISOString();
+    this.callRecordLatestMap.set(`${crmKey}:${recordType}`, { rawBody, capturedAt });
+
+    if (!changed) return;
+
+    const payload = {
+      crmKey,
+      recordType,
+      rawBody,
+      capturedAt,
+    };
+    this.server.to(callRecordsRoom(crmKey)).emit('call-record:raw', payload);
+    // 兼容旧订阅端：未传 crmKey 的订阅仍在 ROOM_CALL_RECORDS
+    this.server.to(ROOM_CALL_RECORDS).emit('call-record:raw', payload);
   }
 }

@@ -9,12 +9,14 @@ import { CrmRequestSchedulerService } from './crm-request-scheduler.service';
 import { TelegramNotifyService } from './telegram-notify.service';
 import { PluginDataModule } from '../plugin-data/plugin-data.module';
 import { VoiceTableModule } from '../voice-table/voice-table.module';
+import { CallRecordModule } from '../call-record/call-record.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([CrawlProfile]),
     forwardRef(() => PluginDataModule),
     VoiceTableModule,
+    CallRecordModule,
   ],
   controllers: [CrawlProfileController],
   providers: [

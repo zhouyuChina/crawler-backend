@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PluginDataService } from '../plugin-data/plugin-data.service';
 import { VoiceTableService } from '../voice-table/voice-table.service';
+import { CallRecordService } from '../call-record/call-record.service';
 import { CrawlProfile } from './crawl-profile.entity';
 import { CrmAuthService } from './crm-auth.service';
 import * as http from 'http';
@@ -86,6 +87,7 @@ export class CrmRequestRunnerService {
   constructor(
     private readonly pluginDataService: PluginDataService,
     private readonly voiceTableService: VoiceTableService,
+    private readonly callRecordService: CallRecordService,
     private readonly crmAuthService: CrmAuthService,
   ) {}
 
@@ -162,11 +164,13 @@ export class CrmRequestRunnerService {
         this.crmAuthService.touchCookies(profile.id);
         this.logger.debug(`${profile.name}(${taskKey}): 表格抓取已触发`);
       } else {
-        const statusCode = await this.runLightweightGet(url, headers);
+        const { statusCode, body } = await this.runLightweightGet(url, headers);
         if (statusCode >= 400) {
           throw new Error(`HTTP ${statusCode}: ${url}`);
         }
         this.crmAuthService.touchCookies(profile.id);
+        // 推送原始响应体到内存快照，内容变化时 WS 广播
+        this.callRecordService.pushRawRecord(profile.baseUrl, taskKey, body);
         this.logger.debug(`${profile.name}(${taskKey}): 普通请求完成`);
       }
     } catch (err: any) {
@@ -189,11 +193,28 @@ export class CrmRequestRunnerService {
     return TASK_DEFS[taskKey];
   }
 
-  private runLightweightGet(url: string, headers: Headers): Promise<number> {
+  private runLightweightGet(
+    url: string,
+    headers: Headers,
+  ): Promise<{ statusCode: number; body: string }> {
     return new Promise((resolve, reject) => {
       const parsed = new URL(url);
       const isHttps = parsed.protocol === 'https:';
       const client = isHttps ? https : http;
+      const chunks: Buffer[] = [];
+      let receivedBytes = 0;
+      let settled = false;
+
+      const settle = (
+        result: { statusCode: number; body: string } | null,
+        err?: Error,
+      ) => {
+        if (settled) return;
+        settled = true;
+        if (result !== null) resolve(result);
+        else reject(err);
+      };
+
       const req = client.request(
         {
           hostname: parsed.hostname,
@@ -204,21 +225,29 @@ export class CrmRequestRunnerService {
           timeout: SCHEDULER_REQUEST_TIMEOUT_MS,
         },
         (res) => {
-          let receivedBytes = 0;
+          const statusCode = res.statusCode || 0;
           res.on('data', (chunk: Buffer) => {
             receivedBytes += chunk.length;
             if (receivedBytes > SCHEDULER_RESPONSE_DRAIN_LIMIT_BYTES) {
-              req.destroy(
-                new Error(
-                  `scheduler response too large: ${receivedBytes} bytes`,
-                ),
-              );
+              // 超大响应：截断并立刻 settle，然后销毁连接
+              req.destroy();
+              settle({
+                statusCode,
+                body: Buffer.concat(chunks).toString('utf8'),
+              });
+              return;
             }
+            chunks.push(chunk);
           });
-          res.on('end', () => resolve(res.statusCode || 0));
+          res.on('end', () => {
+            settle({
+              statusCode,
+              body: Buffer.concat(chunks).toString('utf8'),
+            });
+          });
         },
       );
-      req.on('error', reject);
+      req.on('error', (err) => settle(null, err));
       req.on('timeout', () => {
         req.destroy(new Error(`scheduler request timeout: ${url}`));
       });
