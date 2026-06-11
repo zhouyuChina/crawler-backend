@@ -61,10 +61,10 @@ export class PluginDataController {
     console.log('Content-Type:', contentType);
     console.log('Body类型:', typeof body);
     console.log(
-      'Body前100字符:',
+      'Body摘要:',
       typeof body === 'string'
         ? body.substring(0, 100)
-        : JSON.stringify(body).substring(0, 100),
+        : `dataType=${body?.dataType ?? '-'} url=${body?.url ?? '-'}`,
     );
 
     // 如果是 HTML 或纯文本格式

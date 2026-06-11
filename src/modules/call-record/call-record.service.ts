@@ -251,6 +251,13 @@ export class CallRecordService {
     return (record.htmlContent || record.content || '').length;
   }
 
+  getMemoryDiagnostics() {
+    return {
+      activeCallsSize: this.activeCalls.size,
+      lastRecordContentHashesSize: this.lastRecordContentHashes.size,
+    };
+  }
+
   /**
    * 记录通话更新时间
    */

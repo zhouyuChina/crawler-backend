@@ -1,4 +1,11 @@
-import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+  forwardRef,
+} from '@nestjs/common';
 import { WebpageService } from '../webpage/webpage.service';
 import { ScreenshotService } from '../screenshot/screenshot.service';
 import { WebsocketGateway } from '../websocket/websocket.gateway';
@@ -17,10 +24,11 @@ const RESPONSE_BODY_PREVIEW_LIMIT = 8 * 1024;
 const MAX_PROXY_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 @Injectable()
-export class PluginDataService {
+export class PluginDataService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PluginDataService.name);
   private readonly lastPersistedContentHashes = new Map<string, string>();
   private readonly lastDuplicateSampleAt = new Map<string, number>();
+  private memoryProbeTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly webpageService: WebpageService,
@@ -30,6 +38,27 @@ export class PluginDataService {
     @Inject(forwardRef(() => CrmAuthService))
     private readonly crmAuthService: CrmAuthService,
   ) {}
+
+  onModuleInit() {
+    this.memoryProbeTimer = setInterval(() => {
+      const ws = this.websocketGateway.getMemoryDiagnostics();
+      const callRecord = this.callRecordService.getMemoryDiagnostics();
+      this.logger.warn(
+        `[mem-probe] plugin ${JSON.stringify({
+          heap: formatMemoryUsage(),
+          dedupeSize: this.lastPersistedContentHashes.size,
+          duplicateSampleSize: this.lastDuplicateSampleAt.size,
+          ...ws,
+          ...callRecord,
+        })}`,
+      );
+    }, 5_000);
+    this.memoryProbeTimer.unref?.();
+  }
+
+  onModuleDestroy() {
+    if (this.memoryProbeTimer) clearInterval(this.memoryProbeTimer);
+  }
 
   async processPluginData(
     dto: PluginSubmitDto,
@@ -121,14 +150,17 @@ export class PluginDataService {
     const timestamp = new Date().toISOString();
     const method = dto.method || 'GET';
     const sourcePluginId = dto.sourcePluginId || 'browser-extension-proxy';
+    const isSchedulerRequest = sourcePluginId === 'crawl-profile-scheduler';
 
-    this.websocketGateway.broadcastRequestReceived({
-      id: requestId,
-      url: dto.url,
-      method,
-      timestamp,
-      status: 'processing',
-    });
+    if (!isSchedulerRequest) {
+      this.websocketGateway.broadcastRequestReceived({
+        id: requestId,
+        url: dto.url,
+        method,
+        timestamp,
+        status: 'processing',
+      });
+    }
 
     try {
       // 发起 HTTP/HTTPS 请求
@@ -197,21 +229,20 @@ export class PluginDataService {
         this.websocketGateway.broadcastWebpageCreated(webpage);
       }
 
-      this.websocketGateway.broadcastRequestProcessed({
-        id: requestId,
-        url: dto.url,
-        method,
-        status: 'success',
-        message: webpage
-          ? `代理请求成功，状态码: ${responseData.statusCode}`
-          : `代理请求成功，状态码: ${responseData.statusCode}（重复内容未落库）`,
-        webpageId: webpage?.id,
-        responseBody:
-          recordType || sourcePluginId === 'crawl-profile-scheduler'
-            ? responseBodyPreview
-            : responseData.body,
-        statusCode: responseData.statusCode,
-      });
+      if (!isSchedulerRequest) {
+        this.websocketGateway.broadcastRequestProcessed({
+          id: requestId,
+          url: dto.url,
+          method,
+          status: 'success',
+          message: webpage
+            ? `代理请求成功，状态码: ${responseData.statusCode}`
+            : `代理请求成功，状态码: ${responseData.statusCode}（重复内容未落库）`,
+          webpageId: webpage?.id,
+          responseBody: recordType ? responseBodyPreview : responseData.body,
+          statusCode: responseData.statusCode,
+        });
+      }
 
       // 判断是否是 call-record 类型，如果是则触发专门的事件
       if (recordType) {
@@ -279,13 +310,15 @@ export class PluginDataService {
         responseHeaders: responseData.headers,
       };
     } catch (error: any) {
-      this.websocketGateway.broadcastRequestProcessed({
-        id: requestId,
-        url: dto.url,
-        method,
-        status: 'error',
-        error: error?.message || '代理请求失败',
-      });
+      if (!isSchedulerRequest) {
+        this.websocketGateway.broadcastRequestProcessed({
+          id: requestId,
+          url: dto.url,
+          method,
+          status: 'error',
+          error: error?.message || '代理请求失败',
+        });
+      }
       throw error;
     }
   }

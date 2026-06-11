@@ -46,6 +46,7 @@ export class WebsocketGateway
     statusCode?: number;
   }> = [];
   private readonly maxRequestHistory = 100;
+  private lastSocketBufferLogAt = 0;
 
   handleConnection(client: Socket) {
     this.logger.log(`Client connected: ${client.id}`);
@@ -166,6 +167,7 @@ export class WebsocketGateway
     const safeData = this.sanitizeRequestEvent(data);
     this.upsertRequestHistory(safeData);
     this.server.to(ROOM_REQUEST_MONITOR).emit('request:processed', safeData);
+    this.logSocketBufferStats('request-monitor');
     this.logger.log(`广播请求处理完成: ${data.status} - ${data.url}`);
   }
 
@@ -207,6 +209,38 @@ export class WebsocketGateway
       ...event,
       responseBody: `${event.responseBody.slice(0, REQUEST_BODY_PREVIEW_LIMIT)}\n...[truncated ${event.responseBody.length - REQUEST_BODY_PREVIEW_LIMIT} chars]`,
     };
+  }
+
+  getMemoryDiagnostics() {
+    let socketCount = 0;
+    let socketBufferedPackets = 0;
+    for (const socket of this.server.sockets.sockets.values()) {
+      socketCount++;
+      socketBufferedPackets += (socket.conn as any)?.writeBuffer?.length ?? 0;
+    }
+    return {
+      requestHistorySize: this.requestHistory.length,
+      socketCount,
+      socketBufferedPackets,
+    };
+  }
+
+  private logSocketBufferStats(reason: string) {
+    const now = Date.now();
+    if (now - this.lastSocketBufferLogAt < 30_000) return;
+    this.lastSocketBufferLogAt = now;
+
+    let sockets = 0;
+    let bufferedPackets = 0;
+    for (const socket of this.server.sockets.sockets.values()) {
+      sockets++;
+      bufferedPackets += ((socket.conn as any)?.writeBuffer?.length ?? 0);
+    }
+    if (sockets > 0 || bufferedPackets > 0) {
+      this.logger.warn(
+        `[mem-diagnose] ws ${reason}: sockets=${sockets} bufferedPackets=${bufferedPackets}`,
+      );
+    }
   }
 
   // 广播通话记录创建事件

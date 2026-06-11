@@ -49,6 +49,7 @@ export function buildTaskKeys(contents: CrawlContent[]): TaskKey[] {
 export class CrmRequestSchedulerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CrmRequestSchedulerService.name);
   private readonly stateMap = new Map<string, TaskState>();
+  private memoryProbeTimer?: NodeJS.Timeout;
 
   constructor(
     @InjectRepository(CrawlProfile)
@@ -64,9 +65,26 @@ export class CrmRequestSchedulerService implements OnModuleInit, OnModuleDestroy
     this.crmAuthService.registerAuthStatusChangedCallback(() =>
       this.refreshProfilesCache(),
     );
+    this.memoryProbeTimer = setInterval(() => {
+      const runningTasks = Array.from(this.stateMap.values()).filter(
+        (state) => state.running,
+      ).length;
+      const { heapUsed, heapTotal, rss } = process.memoryUsage();
+      const mb = 1024 * 1024;
+      this.logger.warn(
+        `[mem-probe] scheduler ${JSON.stringify({
+          heap: `${(heapUsed / mb).toFixed(1)}/${(heapTotal / mb).toFixed(1)}MB rss=${(rss / mb).toFixed(1)}MB`,
+          stateMapSize: this.stateMap.size,
+          runningTasks,
+          cachedProfiles: this.cachedProfiles.length,
+        })}`,
+      );
+    }, 5_000);
+    this.memoryProbeTimer.unref?.();
   }
 
   onModuleDestroy() {
+    if (this.memoryProbeTimer) clearInterval(this.memoryProbeTimer);
     this.stateMap.clear();
   }
 

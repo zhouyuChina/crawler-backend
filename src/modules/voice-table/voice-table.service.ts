@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as http from 'http';
@@ -117,7 +117,7 @@ export interface CrawlStartResult {
 }
 
 @Injectable()
-export class VoiceTableService {
+export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(VoiceTableService.name);
 
   /** key: `${module}:${mid}` -> last successful start timestamp */
@@ -128,6 +128,7 @@ export class VoiceTableService {
   private historyActiveMap = new Map<string, boolean>();
   /** key: `${crmKey}:${mid}:${dst}` -> true when initial-status refresh is running */
   private initialRefreshActiveKeys = new Set<string>();
+  private memoryProbeTimer?: NodeJS.Timeout;
 
   constructor(
     @InjectRepository(VoiceIvrRecord)
@@ -144,6 +145,25 @@ export class VoiceTableService {
     private readonly crawlStateRepo: Repository<VoiceCrawlState>,
     private readonly ws: WebsocketGateway,
   ) {}
+
+  onModuleInit() {
+    this.memoryProbeTimer = setInterval(() => {
+      this.logger.warn(
+        `[mem-probe] voice-table ${JSON.stringify({
+          heap: this.formatHeapUsage(),
+          throttleMapSize: this.throttleMap.size,
+          activeMapSize: this.activeMap.size,
+          historyActiveMapSize: this.historyActiveMap.size,
+          initialRefreshActiveKeysSize: this.initialRefreshActiveKeys.size,
+        })}`,
+      );
+    }, 5_000);
+    this.memoryProbeTimer.unref?.();
+  }
+
+  onModuleDestroy() {
+    if (this.memoryProbeTimer) clearInterval(this.memoryProbeTimer);
+  }
 
   async startCrawl(input: {
     crmKey?: string;
