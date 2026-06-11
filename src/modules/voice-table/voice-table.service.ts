@@ -5,7 +5,9 @@ import * as http from 'http';
 import * as https from 'https';
 import { fork } from 'child_process';
 import { existsSync } from 'fs';
-import { join } from 'path';
+import { mkdir, writeFile } from 'fs/promises';
+import { dirname, join } from 'path';
+import { createHash } from 'crypto';
 import { getHeapStatistics } from 'v8';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -13,8 +15,8 @@ import { WebsocketGateway } from '../websocket/websocket.gateway';
 import { VoiceIvrRecord } from './entities/voice-ivr-record.entity';
 import {
   VoiceIvrExportDisposition,
-  VoiceIvrExportNumber,
-} from './entities/voice-ivr-export-number.entity';
+  VoiceIvrExportFile,
+} from './entities/voice-ivr-export-file.entity';
 import { VoiceIvrSummary } from './entities/voice-ivr-summary.entity';
 import { VoiceOpRecord } from './entities/voice-op-record.entity';
 import { VoiceOpSummary } from './entities/voice-op-summary.entity';
@@ -67,6 +69,8 @@ const MEMORY_PAUSE_HEAP_RATIO = 0.7;
 const MEMORY_DANGER_HEAP_RATIO = 0.85;
 /** 单页 HTML 响应体大小上限（2MB），超出则拒绝 */
 const MAX_VOICE_TABLE_HTML_BYTES = 2 * 1024 * 1024;
+/** IVR 导出 txt 只保存文件，允许比 HTML 页更大 */
+const MAX_IVR_EXPORT_TXT_BYTES = 50 * 1024 * 1024;
 /** worker 子进程默认超时（毫秒），超时则 kill */
 const DEFAULT_WORKER_TIMEOUT_MS = 5 * 60 * 1000;
 /** IVR 初始状态后续会变化，需要进入补偿刷新 */
@@ -81,7 +85,6 @@ const IVR_INITIAL_REFRESH_BATCH_SIZE = 50;
 const IVR_INITIAL_REFRESH_CONCURRENCY = 3;
 /** OP 页数较小，直接全量扫以持续修正后变状态 */
 const VOICE_OP_FULL_SCAN_MAX_PAGES = 100;
-
 type Headers = Record<string, string>;
 
 interface PageRange {
@@ -129,8 +132,8 @@ export class VoiceTableService {
   constructor(
     @InjectRepository(VoiceIvrRecord)
     private readonly ivrRecordRepo: Repository<VoiceIvrRecord>,
-    @InjectRepository(VoiceIvrExportNumber)
-    private readonly ivrExportNumberRepo: Repository<VoiceIvrExportNumber>,
+    @InjectRepository(VoiceIvrExportFile)
+    private readonly ivrExportFileRepo: Repository<VoiceIvrExportFile>,
     @InjectRepository(VoiceIvrSummary)
     private readonly ivrSummaryRepo: Repository<VoiceIvrSummary>,
     @InjectRepository(VoiceOpRecord)
@@ -675,28 +678,33 @@ export class VoiceTableService {
       args.headers,
       filterResponse.headers['set-cookie'],
     );
-    const exportResponse = await this.fetchTextResponse(exportUrl, {
-      ...exportHeaders,
-      Referer: filterUrl,
-    });
+    const exportResponse = await this.fetchTextResponse(
+      exportUrl,
+      {
+        ...exportHeaders,
+        Referer: filterUrl,
+      },
+      MAX_IVR_EXPORT_TXT_BYTES,
+    );
     const txt = exportResponse.body;
-    const phoneNumbers = this.parseIvrExportPhoneNumbers(txt);
-    if (phoneNumbers.length === 0) {
+    const lineCount = this.countIvrExportPhoneNumbers(txt);
+    if (lineCount === 0) {
       this.logger.log(
         `IVR 导出无号码 ${args.crmKey}: ${args.disposition} date=${args.sourceDate}`,
       );
       return 0;
     }
 
-    await this.upsertIvrExportNumbers({
+    await this.saveIvrExportFile({
       crmKey: args.crmKey,
       mid: args.mid,
       disposition: args.disposition,
       sourceDate: args.sourceDate,
       sourceUrl: exportUrl,
-      phoneNumbers,
+      txt,
+      lineCount,
     });
-    return phoneNumbers.length;
+    return lineCount;
   }
 
   async refreshInitialIvrRecords(input: {
@@ -1643,15 +1651,35 @@ export class VoiceTableService {
     );
   }
 
-  private parseIvrExportPhoneNumbers(txt: string): string[] {
-    const seen = new Set<string>();
-    for (const line of txt.split(/\r?\n/)) {
-      const phone = line.trim();
-      if (!phone) continue;
-      if (!/^[0-9+()\-\s]+$/.test(phone)) continue;
-      seen.add(phone.replace(/\s+/g, ''));
+  private countIvrExportPhoneNumbers(txt: string): number {
+    let count = 0;
+    let start = 0;
+    for (let i = 0; i <= txt.length; i++) {
+      if (i < txt.length && txt.charCodeAt(i) !== 10) continue;
+      const line = txt.slice(start, i).trim();
+      start = i + 1;
+      if (!line) continue;
+      if (!/^[0-9+()\-\s]+$/.test(line)) continue;
+      count++;
     }
-    return Array.from(seen);
+    return count;
+  }
+
+  private buildIvrExportFilePath(args: {
+    crmKey: string;
+    mid: number;
+    disposition: VoiceIvrExportDisposition;
+    sourceDate: string;
+  }): string {
+    const safeCrmKey = args.crmKey.replace(/[^a-z0-9._-]+/gi, '_');
+    const fileName = args.disposition === '接通' ? 'connected.txt' : 'not_connected.txt';
+    return join(
+      process.env.VOICE_IVR_EXPORT_DIR ?? 'data/ivr-exports',
+      args.sourceDate,
+      safeCrmKey,
+      String(args.mid),
+      fileName,
+    );
   }
 
   private mergeSetCookiesIntoHeaders(
@@ -1985,34 +2013,54 @@ export class VoiceTableService {
     return raw;
   }
 
-  private async upsertIvrExportNumbers(args: {
+  private async saveIvrExportFile(args: {
     crmKey: string;
     mid: number;
     disposition: VoiceIvrExportDisposition;
     sourceDate: string;
     sourceUrl: string;
-    phoneNumbers: string[];
+    txt: string;
+    lineCount: number;
   }): Promise<void> {
-    if (args.phoneNumbers.length === 0) return;
+    const filePath = this.buildIvrExportFilePath(args);
+    const contentHash = createHash('sha256').update(args.txt).digest('hex');
+    const existing = await this.ivrExportFileRepo.findOne({
+      where: {
+        crmKey: args.crmKey,
+        mid: args.mid,
+        disposition: args.disposition,
+        sourceDate: args.sourceDate,
+      },
+    });
 
-    const rows = args.phoneNumbers.map((phoneNumber) => ({
-      id: uuidv4(),
-      crmKey: args.crmKey,
-      mid: args.mid,
-      phoneNumber,
-      disposition: args.disposition,
-      sourceDate: args.sourceDate,
-      sourceUrl: args.sourceUrl,
-    }));
+    if (!existing || existing.contentHash !== contentHash || existing.filePath !== filePath) {
+      await mkdir(dirname(filePath), { recursive: true });
+      await writeFile(filePath, args.txt, 'utf8');
+    }
 
-    await this.ivrExportNumberRepo
+    await this.ivrExportFileRepo
       .createQueryBuilder()
       .insert()
-      .into(VoiceIvrExportNumber)
-      .values(rows)
+      .into(VoiceIvrExportFile)
+      .values({
+        id: uuidv4(),
+        crmKey: args.crmKey,
+        mid: args.mid,
+        disposition: args.disposition,
+        sourceDate: args.sourceDate,
+        filePath,
+        lineCount: args.lineCount,
+        contentHash,
+        sourceUrl: args.sourceUrl,
+        capturedAt: new Date(),
+      })
       .onConflict(
-        `("crmKey", mid, "phoneNumber", disposition, "sourceDate") DO UPDATE SET
+        `("crmKey", mid, disposition, "sourceDate") DO UPDATE SET
+          "filePath" = EXCLUDED."filePath",
+          "lineCount" = EXCLUDED."lineCount",
+          "contentHash" = EXCLUDED."contentHash",
           "sourceUrl" = EXCLUDED."sourceUrl",
+          "capturedAt" = EXCLUDED."capturedAt",
           "updatedAt" = now()`,
       )
       .execute();
@@ -2234,6 +2282,7 @@ export class VoiceTableService {
   private fetchTextResponse(
     url: string,
     headers: Headers,
+    maxBytes = MAX_VOICE_TABLE_HTML_BYTES,
   ): Promise<{ body: string; headers: http.IncomingHttpHeaders }> {
     return new Promise((resolve, reject) => {
       let parsed: URL;
@@ -2262,11 +2311,11 @@ export class VoiceTableService {
 
           res.on('data', (c: Buffer) => {
             receivedBytes += c.length;
-            if (receivedBytes > MAX_VOICE_TABLE_HTML_BYTES) {
+            if (receivedBytes > maxBytes) {
               abortedBySize = true;
               req.destroy(
                 new Error(
-                  `response too large: ${receivedBytes} bytes > ${MAX_VOICE_TABLE_HTML_BYTES} bytes`,
+                  `response too large: ${receivedBytes} bytes > ${maxBytes} bytes`,
                 ),
               );
               return;

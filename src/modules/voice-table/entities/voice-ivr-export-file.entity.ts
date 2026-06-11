@@ -11,18 +11,18 @@ import { v4 as uuidv4 } from 'uuid';
 
 export type VoiceIvrExportDisposition = '接通' | '未接通';
 
-@Entity('voice_ivr_export_numbers')
+@Entity('voice_ivr_export_files')
 @Index(
-  'uq_voice_ivr_export_number_daily',
-  ['crmKey', 'mid', 'phoneNumber', 'disposition', 'sourceDate'],
+  'uq_voice_ivr_export_file_daily',
+  ['crmKey', 'mid', 'disposition', 'sourceDate'],
   { unique: true },
 )
-@Index('idx_voice_ivr_export_number_crm_date', [
+@Index('idx_voice_ivr_export_file_crm_date', [
   'crmKey',
   'sourceDate',
   'disposition',
 ])
-export class VoiceIvrExportNumber {
+export class VoiceIvrExportFile {
   @PrimaryColumn('uuid')
   id: string;
 
@@ -39,9 +39,6 @@ export class VoiceIvrExportNumber {
   @Column({ type: 'integer' })
   mid: number;
 
-  @Column({ type: 'varchar', length: 32 })
-  phoneNumber: string;
-
   @Column({ type: 'varchar', length: 16 })
   disposition: VoiceIvrExportDisposition;
 
@@ -49,8 +46,20 @@ export class VoiceIvrExportNumber {
   @Column({ type: 'varchar', length: 10 })
   sourceDate: string;
 
+  @Column({ type: 'text' })
+  filePath: string;
+
+  @Column({ type: 'integer', default: 0 })
+  lineCount: number;
+
+  @Column({ type: 'varchar', length: 64 })
+  contentHash: string;
+
   @Column({ type: 'text', nullable: true })
   sourceUrl: string | null;
+
+  @Column({ type: 'timestamp' })
+  capturedAt: Date;
 
   @CreateDateColumn()
   createdAt: Date;
