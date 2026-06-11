@@ -53,11 +53,7 @@ const TASK_DEFS: Record<TaskKey, TaskDef> = {
   },
   cc_voiceivr: {
     intervalMs: 5 * 60 * 1000,
-    buildUrl: (p) => {
-      const mid = p.mids?.voiceRecords ?? 24;
-      return `${p.baseUrl}/modules/cc_voiceivr/?mid=${mid}`;
-    },
-    isTable: true,
+    buildUrl: (p) => `${p.baseUrl}/modules/cc_voiceivr/`,
   },
   cc_voiceivr_initial_refresh: {
     intervalMs: 60 * 1000,
@@ -112,6 +108,23 @@ export class CrmRequestRunnerService {
     };
 
     try {
+      if (taskKey === 'cc_voiceivr') {
+        const result = await this.voiceTableService.crawlIvrExportNumbers({
+          crmKey: profile.baseUrl,
+          mid: profile.mids?.voiceRecords ?? 24,
+          url,
+          headers,
+        });
+        if (!result.success) {
+          throw new Error(result.message || 'ivr export crawl failed');
+        }
+        this.crmAuthService.touchCookies(profile.id);
+        this.logger.debug(
+          `${profile.name}(${taskKey}): IVR 导出号码 接通=${result.connected} 未接通=${result.notConnected}`,
+        );
+        return;
+      }
+
       if (taskKey === 'cc_voiceivr_initial_refresh') {
         const result = await this.voiceTableService.refreshInitialIvrRecords({
           crmKey: profile.baseUrl,

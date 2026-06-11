@@ -11,6 +11,10 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { WebsocketGateway } from '../websocket/websocket.gateway';
 import { VoiceIvrRecord } from './entities/voice-ivr-record.entity';
+import {
+  VoiceIvrExportDisposition,
+  VoiceIvrExportNumber,
+} from './entities/voice-ivr-export-number.entity';
 import { VoiceIvrSummary } from './entities/voice-ivr-summary.entity';
 import { VoiceOpRecord } from './entities/voice-op-record.entity';
 import { VoiceOpSummary } from './entities/voice-op-summary.entity';
@@ -125,6 +129,8 @@ export class VoiceTableService {
   constructor(
     @InjectRepository(VoiceIvrRecord)
     private readonly ivrRecordRepo: Repository<VoiceIvrRecord>,
+    @InjectRepository(VoiceIvrExportNumber)
+    private readonly ivrExportNumberRepo: Repository<VoiceIvrExportNumber>,
     @InjectRepository(VoiceIvrSummary)
     private readonly ivrSummaryRepo: Repository<VoiceIvrSummary>,
     @InjectRepository(VoiceOpRecord)
@@ -581,6 +587,116 @@ export class VoiceTableService {
       totalPages: newTotalPages,
       pagesToFetch,
     };
+  }
+
+  async crawlIvrExportNumbers(input: {
+    crmKey?: string;
+    mid?: number;
+    url: string;
+    headers: Headers;
+  }): Promise<{
+    success: boolean;
+    module: VoiceModule;
+    mid: number;
+    sourceDate: string;
+    connected: number;
+    notConnected: number;
+    message?: string;
+  }> {
+    const crmKey = this.normalizeCrmKey(input.crmKey ?? input.url);
+    const mid = input.mid ?? extractMid(input.url) ?? 24;
+    const sourceDate = this.getBeijingDateKey();
+    const headers = this.normalizeHeaders(input.headers);
+
+    const connected = await this.crawlIvrExportDisposition({
+      crmKey,
+      mid,
+      baseUrl: input.url,
+      headers,
+      dispositionCode: 1,
+      disposition: '接通',
+      sourceDate,
+    });
+    const notConnected = await this.crawlIvrExportDisposition({
+      crmKey,
+      mid,
+      baseUrl: input.url,
+      headers,
+      dispositionCode: 2,
+      disposition: '未接通',
+      sourceDate,
+    });
+
+    this.logger.log(
+      `IVR 导出号码完成 ${crmKey}: mid=${mid} date=${sourceDate} 接通=${connected} 未接通=${notConnected}`,
+    );
+
+    return {
+      success: true,
+      module: 'voice_ivr',
+      mid,
+      sourceDate,
+      connected,
+      notConnected,
+    };
+  }
+
+  private async crawlIvrExportDisposition(args: {
+    crmKey: string;
+    mid: number;
+    baseUrl: string;
+    headers: Headers;
+    dispositionCode: 1 | 2;
+    disposition: VoiceIvrExportDisposition;
+    sourceDate: string;
+  }): Promise<number> {
+    const filterUrl = this.buildIvrExportFilterUrl(
+      args.baseUrl,
+      args.dispositionCode,
+    );
+    const filterResponse = await this.fetchTextResponse(filterUrl, {
+      ...args.headers,
+      Referer: this.buildProfileModuleReferer(args.baseUrl),
+    });
+    const filterHtml = filterResponse.body;
+    const strategy = resolveStrategy(filterUrl);
+    const parsed = strategy?.parse(filterHtml);
+    const summary = parsed?.summary as ParsedSummaryVoiceIvr | undefined;
+
+    if (parsed?.summaryMatched && summary && this.isIvrSummaryAllZero(summary)) {
+      this.logger.log(
+        `IVR 导出跳过 ${args.crmKey}: ${args.disposition} 汇总全 0`,
+      );
+      return 0;
+    }
+
+    const exportUrl = this.buildIvrExportDownloadUrl(args.baseUrl);
+    const exportHeaders = this.mergeSetCookiesIntoHeaders(
+      args.headers,
+      filterResponse.headers['set-cookie'],
+    );
+    const exportResponse = await this.fetchTextResponse(exportUrl, {
+      ...exportHeaders,
+      Referer: filterUrl,
+    });
+    const txt = exportResponse.body;
+    const phoneNumbers = this.parseIvrExportPhoneNumbers(txt);
+    if (phoneNumbers.length === 0) {
+      this.logger.log(
+        `IVR 导出无号码 ${args.crmKey}: ${args.disposition} date=${args.sourceDate}`,
+      );
+      return 0;
+    }
+
+    await this.upsertIvrExportNumbers({
+      crmKey: args.crmKey,
+      mid: args.mid,
+      disposition: args.disposition,
+      sourceDate: args.sourceDate,
+      sourceUrl: exportUrl,
+      phoneNumbers,
+    });
+    return phoneNumbers.length;
   }
 
   async refreshInitialIvrRecords(input: {
@@ -1495,6 +1611,78 @@ export class VoiceTableService {
       .slice(0, 10);
   }
 
+  private buildProfileModuleReferer(baseUrl: string): string {
+    const url = new URL(baseUrl);
+    return `${url.origin}/modules/index.php`;
+  }
+
+  private buildIvrExportFilterUrl(baseUrl: string, dispositionCode: 1 | 2): string {
+    const url = new URL(baseUrl);
+    url.pathname = '/modules/cc_voiceivr/';
+    url.search = '';
+    url.searchParams.set('ft[name]', '');
+    url.searchParams.set('ft[disposition]', String(dispositionCode));
+    return url.toString();
+  }
+
+  private buildIvrExportDownloadUrl(baseUrl: string): string {
+    const url = new URL(baseUrl);
+    url.pathname = '/modules/cc_voiceivr/down-excel.php';
+    url.search = '';
+    url.searchParams.set('download', '匯出');
+    return url.toString();
+  }
+
+  private isIvrSummaryAllZero(summary: ParsedSummaryVoiceIvr): boolean {
+    return (
+      summary.totalRecords === 0 &&
+      summary.connectFail === 0 &&
+      summary.busy === 0 &&
+      summary.noAnswer === 0 &&
+      summary.connected === 0
+    );
+  }
+
+  private parseIvrExportPhoneNumbers(txt: string): string[] {
+    const seen = new Set<string>();
+    for (const line of txt.split(/\r?\n/)) {
+      const phone = line.trim();
+      if (!phone) continue;
+      if (!/^[0-9+()\-\s]+$/.test(phone)) continue;
+      seen.add(phone.replace(/\s+/g, ''));
+    }
+    return Array.from(seen);
+  }
+
+  private mergeSetCookiesIntoHeaders(
+    headers: Headers,
+    setCookies: string[] | undefined,
+  ): Headers {
+    if (!setCookies || setCookies.length === 0) return headers;
+
+    const cookieMap = new Map<string, string>();
+    const currentCookie = headers.Cookie ?? headers.cookie;
+    if (currentCookie) {
+      for (const part of currentCookie.split(';')) {
+        const [name, ...value] = part.trim().split('=');
+        if (name && value.length > 0) cookieMap.set(name, value.join('='));
+      }
+    }
+
+    for (const setCookie of setCookies) {
+      const [pair] = setCookie.split(';');
+      const [name, ...value] = pair.trim().split('=');
+      if (name && value.length > 0) cookieMap.set(name, value.join('='));
+    }
+
+    return {
+      ...headers,
+      Cookie: Array.from(cookieMap.entries())
+        .map(([name, value]) => `${name}=${value}`)
+        .join('; '),
+    };
+  }
+
   private buildIvrAnchorKey(
     crmKey: string,
     mid: number,
@@ -1797,6 +1985,39 @@ export class VoiceTableService {
     return raw;
   }
 
+  private async upsertIvrExportNumbers(args: {
+    crmKey: string;
+    mid: number;
+    disposition: VoiceIvrExportDisposition;
+    sourceDate: string;
+    sourceUrl: string;
+    phoneNumbers: string[];
+  }): Promise<void> {
+    if (args.phoneNumbers.length === 0) return;
+
+    const rows = args.phoneNumbers.map((phoneNumber) => ({
+      id: uuidv4(),
+      crmKey: args.crmKey,
+      mid: args.mid,
+      phoneNumber,
+      disposition: args.disposition,
+      sourceDate: args.sourceDate,
+      sourceUrl: args.sourceUrl,
+    }));
+
+    await this.ivrExportNumberRepo
+      .createQueryBuilder()
+      .insert()
+      .into(VoiceIvrExportNumber)
+      .values(rows)
+      .onConflict(
+        `("crmKey", mid, "phoneNumber", disposition, "sourceDate") DO UPDATE SET
+          "sourceUrl" = EXCLUDED."sourceUrl",
+          "updatedAt" = now()`,
+      )
+      .execute();
+  }
+
   private async upsertVoiceOpRecords(entities: VoiceOpRecord[]): Promise<any[]> {
     const result = await this.opRecordRepo
       .createQueryBuilder()
@@ -2007,6 +2228,13 @@ export class VoiceTableService {
   }
 
   private fetchHtml(url: string, headers: Headers): Promise<string> {
+    return this.fetchTextResponse(url, headers).then((response) => response.body);
+  }
+
+  private fetchTextResponse(
+    url: string,
+    headers: Headers,
+  ): Promise<{ body: string; headers: http.IncomingHttpHeaders }> {
     return new Promise((resolve, reject) => {
       let parsed: URL;
       try {
@@ -2052,7 +2280,7 @@ export class VoiceTableService {
               reject(new Error(`HTTP ${res.statusCode}: ${url}`));
               return;
             }
-            resolve(body);
+            resolve({ body, headers: res.headers });
           });
         },
       );

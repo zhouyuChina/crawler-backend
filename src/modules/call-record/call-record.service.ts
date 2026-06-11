@@ -154,7 +154,7 @@ export class CallRecordService {
    */
   async findLatestByType(
     recordType: string,
-    options: { full?: boolean } = {},
+    options: { full?: boolean; sourceUrl?: string } = {},
   ): Promise<Partial<Webpage> | null> {
     const keyword = this.RECORD_TYPE_KEYWORDS[recordType];
 
@@ -169,6 +169,16 @@ export class CallRecordService {
     }
     queryBuilder.where('webpage.url LIKE :url', { url: `%${keyword}%` });
 
+    const sourceUrl = options.sourceUrl?.trim();
+    if (sourceUrl) {
+      queryBuilder.andWhere(
+        "webpage.url LIKE :sourceUrlPrefix ESCAPE '\\'",
+        {
+          sourceUrlPrefix: `${this.escapeLikePattern(sourceUrl)}%`,
+        },
+      );
+    }
+
     // 排除包含 "無任何通話記錄" 的记录
     queryBuilder.andWhere(
       '(webpage.content NOT LIKE :excludeText AND webpage.htmlContent NOT LIKE :excludeText) OR (webpage.content IS NULL AND webpage.htmlContent IS NULL)',
@@ -180,7 +190,7 @@ export class CallRecordService {
     if (options.full) {
       const record = await queryBuilder.getOne();
       this.logger.warn(
-        `[mem-diagnose] call-records latest recordType=${recordType} full=true contentChars=${this.getRecordContentLength(record)} heap=${formatMemoryUsage()}`,
+        `[mem-diagnose] call-records latest recordType=${recordType} sourceUrl=${sourceUrl || 'all'} full=true contentChars=${this.getRecordContentLength(record)} heap=${formatMemoryUsage()}`,
       );
       return record;
     }
@@ -188,9 +198,13 @@ export class CallRecordService {
     const row = await queryBuilder.getRawOne();
     const record = row ? this.mapPreviewRow(row) : null;
     this.logger.warn(
-      `[mem-diagnose] call-records latest recordType=${recordType} full=false contentChars=${this.getRecordContentLength(record)} heap=${formatMemoryUsage()}`,
+      `[mem-diagnose] call-records latest recordType=${recordType} sourceUrl=${sourceUrl || 'all'} full=false contentChars=${this.getRecordContentLength(record)} heap=${formatMemoryUsage()}`,
     );
     return record;
+  }
+
+  private escapeLikePattern(value: string): string {
+    return value.replace(/[\\%_]/g, (char) => `\\${char}`);
   }
 
   private selectPreviewColumns(queryBuilder: any) {

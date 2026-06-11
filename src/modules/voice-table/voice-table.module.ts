@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { VoiceTableController } from './voice-table.controller';
 import { VoiceTableService } from './voice-table.service';
 import { VoiceIvrRecord } from './entities/voice-ivr-record.entity';
+import { VoiceIvrExportNumber } from './entities/voice-ivr-export-number.entity';
 import { VoiceIvrSummary } from './entities/voice-ivr-summary.entity';
 import { VoiceOpRecord } from './entities/voice-op-record.entity';
 import { VoiceOpSummary } from './entities/voice-op-summary.entity';
@@ -14,6 +15,7 @@ import { WebsocketModule } from '../websocket/websocket.module';
   imports: [
     TypeOrmModule.forFeature([
       VoiceIvrRecord,
+      VoiceIvrExportNumber,
       VoiceIvrSummary,
       VoiceOpRecord,
       VoiceOpSummary,

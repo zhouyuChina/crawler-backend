@@ -75,4 +75,33 @@ describe('CallRecordService', () => {
       websocketGateway.broadcastCallStatusChanged,
     ).not.toHaveBeenCalled();
   });
+
+  it('filters latest records by sourceUrl prefix when provided', async () => {
+    const queryBuilder = {
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      setParameter: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      getRawOne: jest.fn().mockResolvedValue(null),
+    };
+    (webpageRepository.createQueryBuilder as jest.Mock).mockReturnValue(
+      queryBuilder,
+    );
+
+    await service.findLatestByType('get_peer_status', {
+      sourceUrl: 'http://23.171.216.176:58811/',
+    });
+
+    expect(queryBuilder.where).toHaveBeenCalledWith('webpage.url LIKE :url', {
+      url: '%get_peer_status%',
+    });
+    expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+      "webpage.url LIKE :sourceUrlPrefix ESCAPE '\\'",
+      {
+        sourceUrlPrefix: 'http://23.171.216.176:58811/%',
+      },
+    );
+  });
 });

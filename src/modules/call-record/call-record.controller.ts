@@ -43,9 +43,11 @@ export class CallRecordController {
   async findLatestByType(
     @Param('recordType') recordType: string,
     @Query('full') full?: string,
+    @Query('sourceUrl') sourceUrl?: string,
   ) {
     const record = await this.callRecordService.findLatestByType(recordType, {
       full: full === '1' || full === 'true',
+      sourceUrl,
     });
 
     if (!record) {
