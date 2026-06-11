@@ -1,4 +1,4 @@
-export type VoiceModule = 'voice_ivr' | 'voice_op';
+export type VoiceModule = 'voice_ivr' | 'voice_op' | 'voice_dm_op';
 
 export interface ParsedRowVoiceIvr {
   recordId: string;

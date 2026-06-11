@@ -309,6 +309,9 @@
               <label class="checkbox-item">
                 <input type="checkbox" name="add_contents" value="manualRecords"> 人工记录
               </label>
+              <label class="checkbox-item">
+                <input type="checkbox" name="add_contents" value="handDialRecords" checked> 手拨记录
+              </label>
             </div>
           </div>
           <div class="form-group" style="margin-bottom:18px">
@@ -482,6 +485,7 @@ const CONTENT_LABELS = {
   concurrentStatus: '并发状态',
   voiceRecords: '语音记录',
   manualRecords: '人工记录',
+  handDialRecords: '手拨记录',
 };
 
 const AUTH_BADGES = {
@@ -688,6 +692,8 @@ async function doCreate() {
       document.getElementById(id).value = '';
     });
     document.querySelectorAll('input[name="add_contents"]').forEach(el => el.checked = false);
+    const handDialDefault = document.querySelector('input[name="add_contents"][value="handDialRecords"]');
+    if (handDialDefault) handDialDefault.checked = true;
     document.getElementById('f_enabled').checked = false;
     await refreshList();
   } catch(e) {

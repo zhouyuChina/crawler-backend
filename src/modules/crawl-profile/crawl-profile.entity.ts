@@ -10,7 +10,8 @@ export type CrawlContent =
   | 'voiceCallStatus'
   | 'concurrentStatus'
   | 'voiceRecords'
-  | 'manualRecords';
+  | 'manualRecords'
+  | 'handDialRecords';
 
 export type AuthStatus =
   | 'unknown'

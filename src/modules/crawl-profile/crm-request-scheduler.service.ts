@@ -42,6 +42,10 @@ export function buildTaskKeys(contents: CrawlContent[]): TaskKey[] {
     keys.add('cc_voiceop');
   }
 
+  if (contents.includes('handDialRecords')) {
+    keys.add('dm_voiceop');
+  }
+
   return Array.from(keys);
 }
 

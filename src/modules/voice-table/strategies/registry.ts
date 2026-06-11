@@ -1,8 +1,13 @@
 import { VoiceTableStrategy } from './strategy.types';
 import { voiceIvrStrategy } from './voice-ivr.strategy';
 import { voiceOpStrategy } from './voice-op.strategy';
+import { voiceDmOpStrategy } from './voice-dm-op.strategy';
 
-const STRATEGIES: VoiceTableStrategy[] = [voiceIvrStrategy, voiceOpStrategy];
+const STRATEGIES: VoiceTableStrategy[] = [
+  voiceIvrStrategy,
+  voiceOpStrategy,
+  voiceDmOpStrategy,
+];
 
 export function resolveStrategy(url: string): VoiceTableStrategy | null {
   return STRATEGIES.find((s) => s.matchUrl(url)) ?? null;
@@ -30,4 +35,4 @@ export function ensurePageIdParam(url: string, pageId: number): string {
   }
 }
 
-export { voiceIvrStrategy, voiceOpStrategy };
+export { voiceIvrStrategy, voiceOpStrategy, voiceDmOpStrategy };

@@ -18,6 +18,7 @@ const ROOM_TABLE_CRAWL = 'table-crawl';
 
 /** 每 crmKey 房间前缀，e.g. "call-records:http://x.x.x.x:port" */
 const callRecordsRoom = (crmKey: string) => `call-records:${crmKey}`;
+const tableCrawlRoom = (crmKey: string) => `table-crawl:${crmKey}`;
 
 interface CallRecordEntry {
   rawBody: string;
@@ -193,19 +194,71 @@ export class WebsocketGateway
   }
 
   @SubscribeMessage('subscribe:table-crawl')
-  handleSubscribeTableCrawl(@ConnectedSocket() client: Socket) {
+  handleSubscribeTableCrawl(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { crmKey?: string; crmKeys?: string[] } | null,
+  ) {
     if (!client?.id) return { success: false };
-    this.logger.log(`Client ${client.id} subscribed to table crawl`);
-    client.join(ROOM_TABLE_CRAWL);
+
+    const keys: string[] = [];
+    if (data?.crmKeys?.length) {
+      keys.push(...data.crmKeys);
+    } else if (data?.crmKey) {
+      keys.push(data.crmKey);
+    }
+
+    if (keys.length === 0) {
+      this.logger.log(`Client ${client.id} subscribed to table crawl (legacy room)`);
+      client.join(ROOM_TABLE_CRAWL);
+      return { success: true };
+    }
+
+    for (const crmKey of keys) {
+      client.join(tableCrawlRoom(crmKey));
+    }
+    this.logger.log(
+      `Client ${client.id} subscribed to table-crawl crmKeys=[${keys.join(',')}]`,
+    );
     return { success: true };
   }
 
   @SubscribeMessage('unsubscribe:table-crawl')
-  handleUnsubscribeTableCrawl(@ConnectedSocket() client: Socket) {
+  handleUnsubscribeTableCrawl(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { crmKey?: string; crmKeys?: string[] } | null,
+  ) {
     if (!client?.id) return { success: false };
     this.logger.log(`Client ${client.id} unsubscribed from table crawl`);
-    client.leave(ROOM_TABLE_CRAWL);
-    return { success: true };
+
+    const keys: string[] = [];
+    if (data?.crmKeys?.length) {
+      keys.push(...data.crmKeys);
+    } else if (data?.crmKey) {
+      keys.push(data.crmKey);
+    }
+
+    const leftRooms: string[] = [];
+    if (keys.length > 0) {
+      for (const crmKey of keys) {
+        const room = tableCrawlRoom(crmKey);
+        if (client.rooms.has(room)) {
+          client.leave(room);
+          leftRooms.push(room);
+        }
+      }
+    } else {
+      for (const room of client.rooms) {
+        if (room.startsWith(`${ROOM_TABLE_CRAWL}:`)) {
+          client.leave(room);
+          leftRooms.push(room);
+        }
+      }
+    }
+    if (client.rooms.has(ROOM_TABLE_CRAWL)) {
+      client.leave(ROOM_TABLE_CRAWL);
+      leftRooms.push(ROOM_TABLE_CRAWL);
+    }
+    return { success: true, leftRooms };
   }
 
   broadcastWebpageCreated(webpage: any) {
@@ -391,6 +444,7 @@ export class WebsocketGateway
 
   // 广播表格抓取每页新增的行
   broadcastVoiceTableRows(data: {
+    crmKey?: string;
     module: string;
     mid: number;
     page: number;
@@ -398,6 +452,9 @@ export class WebsocketGateway
     taskId: string;
     timestamp: string;
   }) {
+    if (data.crmKey) {
+      this.server.to(tableCrawlRoom(data.crmKey)).emit('table-crawl:rows', data);
+    }
     this.server.to(ROOM_TABLE_CRAWL).emit('table-crawl:rows', data);
     this.logger.log(
       `广播表格新增行: ${data.module} mid=${data.mid} page=${data.page} +${data.rows.length}`,
@@ -406,6 +463,7 @@ export class WebsocketGateway
 
   // 广播表格抓取汇总
   broadcastVoiceTableSummary(data: {
+    crmKey?: string;
     module: string;
     mid: number;
     summary: any;
@@ -414,6 +472,11 @@ export class WebsocketGateway
     capturedAt: string;
     taskId: string;
   }) {
+    if (data.crmKey) {
+      this.server
+        .to(tableCrawlRoom(data.crmKey))
+        .emit('table-crawl:summary', data);
+    }
     this.server.to(ROOM_TABLE_CRAWL).emit('table-crawl:summary', data);
     this.logger.log(
       `广播表格汇总: ${data.module} mid=${data.mid} pages=${data.pagesToFetch}/${data.totalPages}`,
@@ -422,6 +485,7 @@ export class WebsocketGateway
 
   // 广播表格抓取进度
   broadcastVoiceTableProgress(data: {
+    crmKey?: string;
     module: string;
     mid: number;
     taskId: string;
@@ -430,6 +494,11 @@ export class WebsocketGateway
     status: 'running' | 'completed' | 'failed' | 'throttled';
     error?: string;
   }) {
+    if (data.crmKey) {
+      this.server
+        .to(tableCrawlRoom(data.crmKey))
+        .emit('table-crawl:progress', data);
+    }
     this.server.to(ROOM_TABLE_CRAWL).emit('table-crawl:progress', data);
   }
 
@@ -443,6 +512,7 @@ export class WebsocketGateway
     filePath: string;
     capturedAt: string;
   }) {
+    this.server.to(tableCrawlRoom(data.crmKey)).emit('ivr-export:changed', data);
     this.server.to(ROOM_TABLE_CRAWL).emit('ivr-export:changed', data);
     this.logger.log(
       `广播 IVR 导出变化: ${data.crmKey} ${data.disposition} ${data.previousLineCount ?? '-'} -> ${data.lineCount}`,

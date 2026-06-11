@@ -9,6 +9,8 @@ import { VoiceIvrRecord } from '../modules/voice-table/entities/voice-ivr-record
 import { VoiceIvrSummary } from '../modules/voice-table/entities/voice-ivr-summary.entity';
 import { VoiceOpRecord } from '../modules/voice-table/entities/voice-op-record.entity';
 import { VoiceOpSummary } from '../modules/voice-table/entities/voice-op-summary.entity';
+import { VoiceDmOpRecord } from '../modules/voice-table/entities/voice-dm-op-record.entity';
+import { VoiceDmOpSummary } from '../modules/voice-table/entities/voice-dm-op-summary.entity';
 import { ensurePageIdParam, resolveStrategy } from '../modules/voice-table/strategies/registry';
 import {
   ParsedRowVoiceIvr,
@@ -362,7 +364,10 @@ async function runStartCrawl(
   let pagesToFetch: number;
   let pageRanges: WorkerPageRange[];
   let shouldBackfillHistory = false;
-  if (strategy.module === 'voice_op' && totalPages <= VOICE_OP_FULL_SCAN_MAX_PAGES) {
+  if (
+    (strategy.module === 'voice_op' || strategy.module === 'voice_dm_op') &&
+    totalPages <= VOICE_OP_FULL_SCAN_MAX_PAGES
+  ) {
     pagesToFetch = totalPages;
     pageRanges =
       pagesToFetch >= 2
@@ -739,6 +744,32 @@ async function crawlPage(
   };
 }
 
+function getOpRecordRepoAndTable(
+  dataSource: DataSource,
+  module: VoiceModule,
+): {
+  repo: any;
+  tableName: 'voice_op_records' | 'voice_dm_op_records';
+} {
+  if (module === 'voice_dm_op') {
+    return {
+      repo: dataSource.getRepository(VoiceDmOpRecord),
+      tableName: 'voice_dm_op_records',
+    };
+  }
+  return {
+    repo: dataSource.getRepository(VoiceOpRecord),
+    tableName: 'voice_op_records',
+  };
+}
+
+function getOpSummaryRepo(dataSource: DataSource, module: VoiceModule) {
+  if (module === 'voice_dm_op') {
+    return dataSource.getRepository(VoiceDmOpSummary);
+  }
+  return dataSource.getRepository(VoiceOpSummary);
+}
+
 async function persistRows(
   dataSource: DataSource,
   module: VoiceModule,
@@ -759,6 +790,7 @@ async function persistRows(
     );
   }
 
+  const { repo, tableName } = getOpRecordRepoAndTable(dataSource, module);
   const values = (rows as ParsedRowVoiceOp[]).map((r) => ({
     id: uuidv4(),
     crmKey,
@@ -774,11 +806,10 @@ async function persistRows(
     endDate: r.endDate,
     sourceUrl,
   }));
-  const result = await dataSource
-    .getRepository(VoiceOpRecord)
+  const result = await repo
     .createQueryBuilder()
     .insert()
-    .into(VoiceOpRecord)
+    .into(tableName)
     .values(values)
     .onConflict(
       `("crmKey", src, dst, ("callDate"::date)) WHERE "callDate" IS NOT NULL DO UPDATE SET
@@ -790,7 +821,18 @@ async function persistRows(
         duration = EXCLUDED.duration,
         "callDate" = EXCLUDED."callDate",
         "endDate" = EXCLUDED."endDate",
-        "sourceUrl" = EXCLUDED."sourceUrl"`,
+        "sourceUrl" = EXCLUDED."sourceUrl"
+      WHERE
+        ${tableName}.mid IS DISTINCT FROM EXCLUDED.mid
+        OR ${tableName}."recordKey" IS DISTINCT FROM EXCLUDED."recordKey"
+        OR ${tableName}.task IS DISTINCT FROM EXCLUDED.task
+        OR ${tableName}.src IS DISTINCT FROM EXCLUDED.src
+        OR ${tableName}.agent IS DISTINCT FROM EXCLUDED.agent
+        OR ${tableName}.reason IS DISTINCT FROM EXCLUDED.reason
+        OR ${tableName}.duration IS DISTINCT FROM EXCLUDED.duration
+        OR ${tableName}."callDate" IS DISTINCT FROM EXCLUDED."callDate"
+        OR ${tableName}."endDate" IS DISTINCT FROM EXCLUDED."endDate"
+        OR ${tableName}."sourceUrl" IS DISTINCT FROM EXCLUDED."sourceUrl"`,
     )
     .returning(['id', 'crmKey', 'mid', 'recordKey', 'src', 'dst', 'callDate'])
     .execute();
@@ -994,7 +1036,7 @@ async function persistSummary(
     return;
   }
 
-  const repo = dataSource.getRepository(VoiceOpSummary);
+  const repo = getOpSummaryRepo(dataSource, strategy.module);
   const last = await repo.findOne({
     where: { crmKey, mid },
     order: { capturedAt: 'DESC' },
@@ -1041,7 +1083,7 @@ async function getLastTotalPages(
   const repo =
     module === 'voice_ivr'
       ? dataSource.getRepository(VoiceIvrSummary)
-      : dataSource.getRepository(VoiceOpSummary);
+      : getOpSummaryRepo(dataSource, module);
   const last = await repo
     .createQueryBuilder('s')
     .where('s."crmKey" = :crmKey', { crmKey })
@@ -1252,6 +1294,8 @@ function createDataSource(): DataSource {
       VoiceIvrSummary,
       VoiceOpRecord,
       VoiceOpSummary,
+      VoiceDmOpRecord,
+      VoiceDmOpSummary,
       VoiceCrawlState,
     ],
     synchronize: false,

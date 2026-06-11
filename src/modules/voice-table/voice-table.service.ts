@@ -20,6 +20,8 @@ import {
 import { VoiceIvrSummary } from './entities/voice-ivr-summary.entity';
 import { VoiceOpRecord } from './entities/voice-op-record.entity';
 import { VoiceOpSummary } from './entities/voice-op-summary.entity';
+import { VoiceDmOpRecord } from './entities/voice-dm-op-record.entity';
+import { VoiceDmOpSummary } from './entities/voice-dm-op-summary.entity';
 import {
   VoiceCrawlState,
   CrawlStateStatus,
@@ -141,6 +143,10 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
     private readonly opRecordRepo: Repository<VoiceOpRecord>,
     @InjectRepository(VoiceOpSummary)
     private readonly opSummaryRepo: Repository<VoiceOpSummary>,
+    @InjectRepository(VoiceDmOpRecord)
+    private readonly dmOpRecordRepo: Repository<VoiceDmOpRecord>,
+    @InjectRepository(VoiceDmOpSummary)
+    private readonly dmOpSummaryRepo: Repository<VoiceDmOpSummary>,
     @InjectRepository(VoiceCrawlState)
     private readonly crawlStateRepo: Repository<VoiceCrawlState>,
     private readonly ws: WebsocketGateway,
@@ -209,6 +215,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
     } catch (err: any) {
       this.logger.error(`首页抓取失败 ${key}: ${err.message}`);
       this.ws.broadcastVoiceTableProgress({
+        crmKey,
         module: strategy.module,
         mid,
         taskId,
@@ -262,7 +269,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
     );
 
     if (
-      strategy.module === 'voice_op' &&
+      (strategy.module === 'voice_op' || strategy.module === 'voice_dm_op') &&
       newTotalPages <= VOICE_OP_FULL_SCAN_MAX_PAGES
     ) {
       pagesToFetch = newTotalPages;
@@ -397,6 +404,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
     );
     if (insertedFirst.length > 0) {
       this.ws.broadcastVoiceTableRows({
+        crmKey,
         module: strategy.module,
         mid,
         page: 1,
@@ -416,6 +424,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`IVR 首页整页重复 ${key}: 本轮增量无需继续翻页`);
     }
     this.ws.broadcastVoiceTableProgress({
+      crmKey,
       module: strategy.module,
       mid,
       taskId,
@@ -696,6 +705,74 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
     }));
   }
 
+  async getVoiceOpDailyData(input: {
+    crmKey: string;
+    date: string;
+    module: 'voice_op' | 'voice_dm_op';
+    page?: number;
+    limit?: number;
+  }) {
+    if (!['voice_op', 'voice_dm_op'].includes(input.module)) {
+      throw new Error(`unsupported module: ${input.module}`);
+    }
+    const crmKey = this.normalizeCrmKey(input.crmKey);
+    const page = Math.max(1, Number(input.page ?? 1));
+    const limit = Math.min(500, Math.max(1, Number(input.limit ?? 50)));
+    const offset = (page - 1) * limit;
+    const { startUtc, endUtc } = this.getBeijingDayUtcRange(input.date);
+
+    const { repo: recordRepo } = this.getOpRecordRepoAndTable(input.module);
+    const [items, total] = await recordRepo
+      .createQueryBuilder('r')
+      .where('r."crmKey" = :crmKey', { crmKey })
+      .andWhere('r."callDate" >= :startUtc AND r."callDate" < :endUtc', {
+        startUtc,
+        endUtc,
+      })
+      .orderBy('r."callDate"', 'DESC')
+      .addOrderBy('r."createdAt"', 'DESC')
+      .skip(offset)
+      .take(limit)
+      .getManyAndCount();
+
+    const { repo: summaryRepo } = this.getOpSummaryRepo(input.module);
+    const summary = await summaryRepo
+      .createQueryBuilder('s')
+      .where('s."crmKey" = :crmKey', { crmKey })
+      .andWhere('s."capturedAt" >= :startUtc AND s."capturedAt" < :endUtc', {
+        startUtc,
+        endUtc,
+      })
+      .orderBy('s."capturedAt"', 'DESC')
+      .getOne();
+
+    return {
+      crmKey,
+      module: input.module,
+      date: input.date,
+      summary: summary
+        ? {
+            totalRecords: summary.totalRecords,
+            initCount: summary.initCount,
+            ringing: summary.ringing,
+            connected: summary.connected,
+            agentCount: summary.agentCount,
+            connectRate: Number(summary.connectRate),
+            callbackRate: Number(summary.callbackRate),
+            totalPages: summary.totalPages,
+            capturedAt: summary.capturedAt,
+          }
+        : null,
+      items,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  }
+
   private async crawlIvrExportDisposition(args: {
     crmKey: string;
     mid: number;
@@ -881,6 +958,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
 
       if (!result.success) {
         this.ws.broadcastVoiceTableProgress({
+          crmKey: args.crmKey,
           module: args.strategy.module,
           mid: args.mid,
           taskId: args.taskId,
@@ -903,6 +981,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
       await this.drainHistoryWorkerChain(args);
 
       this.ws.broadcastVoiceTableProgress({
+        crmKey: args.crmKey,
         module: args.strategy.module,
         mid: args.mid,
         taskId: args.taskId,
@@ -1032,6 +1111,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
                 `Cookie 失效（${message}），中止后续抓取 ${key}，等待重新登录`,
               );
               this.ws.broadcastVoiceTableProgress({
+                crmKey,
                 module: strategy.module,
                 mid,
                 taskId,
@@ -1052,6 +1132,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
               `抓取 page=${result.page} 失败, 稍后重试 ${key}: ${message}`,
             );
             this.ws.broadcastVoiceTableProgress({
+              crmKey,
               module: strategy.module,
               mid,
               taskId,
@@ -1148,6 +1229,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
         unresolvedFailedPages++;
         this.logger.error(`补抓 page=${failed.page} 失败 ${key}: ${message}`);
         this.ws.broadcastVoiceTableProgress({
+          crmKey,
           module: strategy.module,
           mid,
           taskId,
@@ -1181,6 +1263,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
         : {}),
     });
     this.ws.broadcastVoiceTableProgress({
+      crmKey,
       module: strategy.module,
       mid,
       taskId,
@@ -1242,6 +1325,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
         `表格 worker 执行失败 ${args.key}: ${result.error ?? 'unknown'}`,
       );
       this.ws.broadcastVoiceTableProgress({
+        crmKey: args.crmKey,
         module: args.strategy.module,
         mid: args.mid,
         taskId: args.taskId,
@@ -1257,6 +1341,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
       `表格 worker 完成 ${args.key}: page=${result.highestCompletedPage}/${args.pagesToFetch} failed=${result.failedPages}`,
     );
     this.ws.broadcastVoiceTableProgress({
+      crmKey: args.crmKey,
       module: args.strategy.module,
       mid: args.mid,
       taskId: args.taskId,
@@ -1320,6 +1405,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
           `历史 worker batch 失败 ${args.key}: ${result.error ?? 'unknown'}`,
         );
         this.ws.broadcastVoiceTableProgress({
+          crmKey: args.crmKey,
           module: args.strategy.module,
           mid: args.mid,
           taskId: args.taskId,
@@ -1341,6 +1427,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
         `历史 worker batch 完成 ${args.key}: ${i + 1}/${Number.isFinite(maxBatches) ? maxBatches : '∞'} page=${result.highestCompletedPage}/${result.totalPages}`,
       );
       this.ws.broadcastVoiceTableProgress({
+        crmKey: args.crmKey,
         module: args.strategy.module,
         mid: args.mid,
         taskId: args.taskId,
@@ -1550,6 +1637,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
     // 历史补全模式跳过全量行广播（历史数据不属于实时面板关注范围）
     if (!isHistoryMode && inserted.length > 0) {
       this.ws.broadcastVoiceTableRows({
+        crmKey,
         module: strategy.module,
         mid,
         page,
@@ -1566,6 +1654,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
       page === pagesToFetch;
     if (shouldBroadcastProgress) {
       this.ws.broadcastVoiceTableProgress({
+        crmKey,
         module: strategy.module,
         mid,
         taskId,
@@ -1669,6 +1758,22 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
     return new Date(date.getTime() + 8 * 60 * 60 * 1000)
       .toISOString()
       .slice(0, 10);
+  }
+
+  private getBeijingDayUtcRange(dateKey: string): {
+    startUtc: Date;
+    endUtc: Date;
+  } {
+    const [y, m, d] = dateKey.split('-').map((part) => parseInt(part, 10));
+    if (!y || !m || !d) {
+      throw new Error(`invalid date format, expected YYYY-MM-DD: ${dateKey}`);
+    }
+    // 北京时间 00:00 对应 UTC 前一日 16:00
+    const startMs = Date.UTC(y, m - 1, d, 0, 0, 0, 0) - 8 * 60 * 60 * 1000;
+    return {
+      startUtc: new Date(startMs),
+      endUtc: new Date(startMs + 24 * 60 * 60 * 1000),
+    };
   }
 
   private buildProfileModuleReferer(baseUrl: string): string {
@@ -1908,7 +2013,11 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
     mid: number,
   ): Promise<number | null> {
     const repo =
-      module === 'voice_ivr' ? this.ivrSummaryRepo : this.opSummaryRepo;
+      module === 'voice_ivr'
+        ? this.ivrSummaryRepo
+        : module === 'voice_dm_op'
+          ? this.dmOpSummaryRepo
+          : this.opSummaryRepo;
     const last = await repo
       .createQueryBuilder('s')
       .where('s."crmKey" = :crmKey', { crmKey })
@@ -1962,7 +2071,8 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
 
     const opRows = rows as ParsedRowVoiceOp[];
     const entities = opRows.map((r) => {
-      const e = new VoiceOpRecord();
+      const e =
+        module === 'voice_dm_op' ? new VoiceDmOpRecord() : new VoiceOpRecord();
       e.id = uuidv4();
       e.crmKey = crmKey;
       e.mid = mid;
@@ -1979,7 +2089,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
       return e;
     });
 
-    return this.upsertVoiceOpRecords(entities);
+    return this.upsertVoiceOpRecords(module, entities);
   }
 
   private async upsertVoiceIvrRecords(
@@ -2131,11 +2241,15 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async upsertVoiceOpRecords(entities: VoiceOpRecord[]): Promise<any[]> {
-    const result = await this.opRecordRepo
+  private async upsertVoiceOpRecords(
+    module: VoiceModule,
+    entities: Array<VoiceOpRecord | VoiceDmOpRecord>,
+  ): Promise<any[]> {
+    const { repo, tableName } = this.getOpRecordRepoAndTable(module);
+    const result = await repo
       .createQueryBuilder()
       .insert()
-      .into(VoiceOpRecord)
+      .into(tableName)
       .values(entities)
       .onConflict(
         `("crmKey", src, dst, ("callDate"::date)) WHERE "callDate" IS NOT NULL DO UPDATE SET
@@ -2149,16 +2263,16 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
           "endDate" = EXCLUDED."endDate",
           "sourceUrl" = EXCLUDED."sourceUrl"
         WHERE
-          voice_op_records.mid IS DISTINCT FROM EXCLUDED.mid
-          OR voice_op_records."recordKey" IS DISTINCT FROM EXCLUDED."recordKey"
-          OR voice_op_records.task IS DISTINCT FROM EXCLUDED.task
-          OR voice_op_records.src IS DISTINCT FROM EXCLUDED.src
-          OR voice_op_records.agent IS DISTINCT FROM EXCLUDED.agent
-          OR voice_op_records.reason IS DISTINCT FROM EXCLUDED.reason
-          OR voice_op_records.duration IS DISTINCT FROM EXCLUDED.duration
-          OR voice_op_records."callDate" IS DISTINCT FROM EXCLUDED."callDate"
-          OR voice_op_records."endDate" IS DISTINCT FROM EXCLUDED."endDate"
-          OR voice_op_records."sourceUrl" IS DISTINCT FROM EXCLUDED."sourceUrl"`,
+          ${tableName}.mid IS DISTINCT FROM EXCLUDED.mid
+          OR ${tableName}."recordKey" IS DISTINCT FROM EXCLUDED."recordKey"
+          OR ${tableName}.task IS DISTINCT FROM EXCLUDED.task
+          OR ${tableName}.src IS DISTINCT FROM EXCLUDED.src
+          OR ${tableName}.agent IS DISTINCT FROM EXCLUDED.agent
+          OR ${tableName}.reason IS DISTINCT FROM EXCLUDED.reason
+          OR ${tableName}.duration IS DISTINCT FROM EXCLUDED.duration
+          OR ${tableName}."callDate" IS DISTINCT FROM EXCLUDED."callDate"
+          OR ${tableName}."endDate" IS DISTINCT FROM EXCLUDED."endDate"
+          OR ${tableName}."sourceUrl" IS DISTINCT FROM EXCLUDED."sourceUrl"`,
       )
       .returning([
         'id',
@@ -2222,7 +2336,8 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
       await this.ivrSummaryRepo.save(e);
     } else {
       const s = summary as ParsedSummaryVoiceOp;
-      const last = await this.opSummaryRepo.findOne({
+      const { repo, moduleLabel } = this.getOpSummaryRepo(strategy.module);
+      const last = await repo.findOne({
         where: { crmKey, mid },
         order: { capturedAt: 'DESC' },
       });
@@ -2233,14 +2348,17 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
         last &&
         this.isSameOpSummary(last, s, totalPages, connectRate, callbackRate)
       ) {
-        await this.opSummaryRepo.update(last.id, { capturedAt });
+        await repo.update(last.id, { capturedAt });
         this.logger.debug(
-          `summary 未变化, 更新时间 voice_op:${mid} -> ${capturedAt.toISOString()}`,
+          `summary 未变化, 更新时间 ${moduleLabel}:${mid} -> ${capturedAt.toISOString()}`,
         );
         return;
       }
 
-      const e = new VoiceOpSummary();
+      const e =
+        strategy.module === 'voice_dm_op'
+          ? new VoiceDmOpSummary()
+          : new VoiceOpSummary();
       e.id = uuidv4();
       e.crmKey = crmKey;
       e.mid = mid;
@@ -2254,10 +2372,11 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
       e.totalPages = totalPages;
       e.sourceUrl = sourceUrl;
       e.capturedAt = capturedAt;
-      await this.opSummaryRepo.save(e);
+      await repo.save(e as any);
     }
 
     this.ws.broadcastVoiceTableSummary({
+      crmKey,
       module: strategy.module,
       mid,
       summary,
@@ -2284,7 +2403,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
   }
 
   private isSameOpSummary(
-    last: VoiceOpSummary,
+    last: VoiceOpSummary | VoiceDmOpSummary,
     next: ParsedSummaryVoiceOp,
     totalPages: number,
     connectRate: string,
@@ -2300,6 +2419,38 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
       String(last.callbackRate) === callbackRate &&
       last.totalPages === totalPages
     );
+  }
+
+  private getOpRecordRepoAndTable(module: VoiceModule): {
+    repo: Repository<VoiceOpRecord | VoiceDmOpRecord>;
+    tableName: 'voice_op_records' | 'voice_dm_op_records';
+  } {
+    if (module === 'voice_dm_op') {
+      return {
+        repo: this.dmOpRecordRepo as Repository<VoiceOpRecord | VoiceDmOpRecord>,
+        tableName: 'voice_dm_op_records',
+      };
+    }
+    return {
+      repo: this.opRecordRepo as Repository<VoiceOpRecord | VoiceDmOpRecord>,
+      tableName: 'voice_op_records',
+    };
+  }
+
+  private getOpSummaryRepo(module: VoiceModule): {
+    repo: Repository<VoiceOpSummary | VoiceDmOpSummary>;
+    moduleLabel: 'voice_op' | 'voice_dm_op';
+  } {
+    if (module === 'voice_dm_op') {
+      return {
+        repo: this.dmOpSummaryRepo as Repository<VoiceOpSummary | VoiceDmOpSummary>,
+        moduleLabel: 'voice_dm_op',
+      };
+    }
+    return {
+      repo: this.opSummaryRepo as Repository<VoiceOpSummary | VoiceDmOpSummary>,
+      moduleLabel: 'voice_op',
+    };
   }
 
   private normalizeHeaders(

@@ -26,8 +26,16 @@ export class DataRetentionService implements OnModuleInit {
         webpages: await this.deleteByCreatedAt('webpages', cutoff),
         voiceIvrRecords: await this.deleteByCreatedAt('voice_ivr_records', cutoff),
         voiceOpRecords: await this.deleteByCreatedAt('voice_op_records', cutoff),
+        voiceDmOpRecords: await this.deleteByCreatedAt(
+          'voice_dm_op_records',
+          cutoff,
+        ),
         voiceIvrSummaries: await this.deleteByCreatedAt('voice_ivr_summaries', cutoff),
         voiceOpSummaries: await this.deleteByCreatedAt('voice_op_summaries', cutoff),
+        voiceDmOpSummaries: await this.deleteByCreatedAt(
+          'voice_dm_op_summaries',
+          cutoff,
+        ),
       };
 
       this.logger.log(

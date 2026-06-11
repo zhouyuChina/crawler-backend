@@ -23,4 +23,21 @@ export class VoiceTableController {
   ) {
     return this.service.getIvrExportFiles(crmKey, sourceDate);
   }
+
+  @Get('voice-op-daily')
+  async getVoiceOpDailyData(
+    @Query('crmKey') crmKey: string,
+    @Query('date') date: string,
+    @Query('module') module: 'voice_op' | 'voice_dm_op' = 'voice_op',
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.service.getVoiceOpDailyData({
+      crmKey,
+      date,
+      module,
+      page: page ? parseInt(page, 10) : 1,
+      limit: limit ? parseInt(limit, 10) : 50,
+    });
+  }
 }

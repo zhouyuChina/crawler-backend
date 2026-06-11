@@ -15,7 +15,8 @@ export type TaskKey =
   | 'cc_mrcall'
   | 'cc_voiceivr'
   | 'cc_voiceivr_initial_refresh'
-  | 'cc_voiceop';
+  | 'cc_voiceop'
+  | 'dm_voiceop';
 
 /** 任务定义：间隔(ms)和 URL 生成函数 */
 interface TaskDef {
@@ -75,6 +76,14 @@ const TASK_DEFS: Record<TaskKey, TaskDef> = {
     buildUrl: (p) => {
       const mid = p.mids?.manualRecords ?? 25;
       return `${p.baseUrl}/modules/cc_voiceop/?mid=${mid}`;
+    },
+    isTable: true,
+  },
+  dm_voiceop: {
+    intervalMs: 5 * 60 * 1000,
+    buildUrl: (p) => {
+      const mid = p.mids?.manualRecords ?? 25;
+      return `${p.baseUrl}/modules/dm_voiceop/?mid=${mid}`;
     },
     isTable: true,
   },
