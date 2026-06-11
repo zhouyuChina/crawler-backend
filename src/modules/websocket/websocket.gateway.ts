@@ -214,7 +214,15 @@ export class WebsocketGateway
   getMemoryDiagnostics() {
     let socketCount = 0;
     let socketBufferedPackets = 0;
-    for (const socket of this.server.sockets.sockets.values()) {
+    const sockets = this.server?.sockets?.sockets;
+    if (!sockets) {
+      return {
+        requestHistorySize: this.requestHistory.length,
+        socketCount,
+        socketBufferedPackets,
+      };
+    }
+    for (const socket of sockets.values()) {
       socketCount++;
       socketBufferedPackets += (socket.conn as any)?.writeBuffer?.length ?? 0;
     }
@@ -232,7 +240,9 @@ export class WebsocketGateway
 
     let sockets = 0;
     let bufferedPackets = 0;
-    for (const socket of this.server.sockets.sockets.values()) {
+    const socketMap = this.server?.sockets?.sockets;
+    if (!socketMap) return;
+    for (const socket of socketMap.values()) {
       sockets++;
       bufferedPackets += ((socket.conn as any)?.writeBuffer?.length ?? 0);
     }
