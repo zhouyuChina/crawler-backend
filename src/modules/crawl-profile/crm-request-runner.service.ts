@@ -1,5 +1,4 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { PluginDataService } from '../plugin-data/plugin-data.service';
 import { VoiceTableService } from '../voice-table/voice-table.service';
 import { CallRecordService } from '../call-record/call-record.service';
 import { CrawlProfile } from './crawl-profile.entity';
@@ -94,7 +93,6 @@ export class CrmRequestRunnerService {
   private readonly logger = new Logger(CrmRequestRunnerService.name);
 
   constructor(
-    private readonly pluginDataService: PluginDataService,
     private readonly voiceTableService: VoiceTableService,
     private readonly callRecordService: CallRecordService,
     private readonly crmAuthService: CrmAuthService,

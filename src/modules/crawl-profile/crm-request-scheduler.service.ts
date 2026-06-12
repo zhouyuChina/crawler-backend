@@ -30,9 +30,7 @@ export function buildTaskKeys(contents: CrawlContent[]): TaskKey[] {
     keys.add('cont_controler');
   }
 
-  if (contents.includes('concurrentStatus')) {
-    keys.add('cc_mrcall');
-  }
+  // cc_mrcall 已停用：保留 concurrentStatus 配置字段，当前不再派发该任务
 
   if (contents.includes('voiceRecords')) {
     keys.add('cc_voiceivr');
