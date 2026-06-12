@@ -46,3 +46,22 @@ CREATE INDEX IF NOT EXISTS idx_voice_dm_op_summary_crm_mid_captured
 
 COMMENT ON TABLE voice_dm_op_records IS 'dm_voiceop 手拨记录行表';
 COMMENT ON TABLE voice_dm_op_summaries IS 'dm_voiceop 抓取快照汇总';
+
+-- 授权给应用用户（若执行迁移的用户是超级用户时需要补此语句）
+DO $$
+DECLARE
+  app_user TEXT;
+BEGIN
+  -- 取应用实际连接用的用户，跳过 postgres / 超级用户自身
+  SELECT usename INTO app_user
+  FROM pg_stat_activity
+  WHERE application_name NOT IN ('psql', '')
+    AND usename IS NOT NULL
+    AND usename <> 'postgres'
+  LIMIT 1;
+
+  IF app_user IS NOT NULL THEN
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE voice_dm_op_records TO %I', app_user);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE voice_dm_op_summaries TO %I', app_user);
+  END IF;
+END $$;

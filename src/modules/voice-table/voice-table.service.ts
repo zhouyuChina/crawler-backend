@@ -673,6 +673,42 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
+  async getIvrExportFileContent(args: {
+    crmKey: string;
+    sourceDate: string;
+    disposition: string;
+  }): Promise<string | null> {
+    const crmKey = this.normalizeCrmKey(args.crmKey);
+
+    // 支持英文别名（connected / not_connected）和中文原始值（接通 / 未接通）
+    let dispositionValue: VoiceIvrExportDisposition | null = null;
+    if (args.disposition === 'connected' || args.disposition === '接通') {
+      dispositionValue = '接通';
+    } else if (
+      args.disposition === 'not_connected' ||
+      args.disposition === '未接通'
+    ) {
+      dispositionValue = '未接通';
+    }
+    if (!dispositionValue) return null;
+
+    const record = await this.ivrExportFileRepo.findOne({
+      where: { crmKey, sourceDate: args.sourceDate, disposition: dispositionValue },
+    });
+    if (!record) return null;
+
+    const absolutePath = isAbsolute(record.filePath)
+      ? record.filePath
+      : join(process.cwd(), record.filePath);
+
+    try {
+      const { readFile } = await import('fs/promises');
+      return await readFile(absolutePath, 'utf8');
+    } catch {
+      return null;
+    }
+  }
+
   async getIvrExportFiles(crmKeyInput: string, sourceDate?: string) {
     const crmKey = this.normalizeCrmKey(crmKeyInput);
     const where: { crmKey: string; sourceDate?: string } = { crmKey };
