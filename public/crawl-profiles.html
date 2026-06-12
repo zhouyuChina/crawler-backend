@@ -298,16 +298,13 @@
             <label>抓取内容（可多选）</label>
             <div class="checkbox-group" style="margin-top:6px">
               <label class="checkbox-item">
-                <input type="checkbox" name="add_contents" value="voiceCallStatus"> 语音呼叫状态
+                <input type="checkbox" name="add_contents" value="voiceCallStatus" checked> 语音呼叫状态
               </label>
               <label class="checkbox-item">
-                <input type="checkbox" name="add_contents" value="concurrentStatus"> 并发状态
+                <input type="checkbox" name="add_contents" value="voiceRecords" checked> 语音记录
               </label>
               <label class="checkbox-item">
-                <input type="checkbox" name="add_contents" value="voiceRecords"> 语音记录
-              </label>
-              <label class="checkbox-item">
-                <input type="checkbox" name="add_contents" value="manualRecords"> 人工记录
+                <input type="checkbox" name="add_contents" value="manualRecords" checked> 人工记录
               </label>
               <label class="checkbox-item">
                 <input type="checkbox" name="add_contents" value="handDialRecords" checked> 手拨记录
@@ -330,10 +327,6 @@
               <div class="form-group">
                 <label>语音呼叫状态 mid</label>
                 <input type="text" id="f_mid_vcs" placeholder="9">
-              </div>
-              <div class="form-group">
-                <label>并发状态 mid</label>
-                <input type="text" id="f_mid_cs" placeholder="5">
               </div>
               <div class="form-group">
                 <label>语音记录 mid</label>
@@ -482,7 +475,6 @@ async function refreshList() {
 
 const CONTENT_LABELS = {
   voiceCallStatus: '语音呼叫状态',
-  concurrentStatus: '并发状态',
   voiceRecords: '语音记录',
   manualRecords: '人工记录',
   handDialRecords: '手拨记录',
@@ -589,8 +581,6 @@ function renderProfile(p) {
         <div class="form-row" style="margin-top:10px">
           <div class="form-group"><label>语音呼叫状态</label>
             <input type="text" id="e_mid_vcs_${p.id}" value="${p.mids?.voiceCallStatus ?? 9}"></div>
-          <div class="form-group"><label>并发状态</label>
-            <input type="text" id="e_mid_cs_${p.id}" value="${p.mids?.concurrentStatus ?? 5}"></div>
           <div class="form-group"><label>语音记录</label>
             <input type="text" id="e_mid_vr_${p.id}" value="${p.mids?.voiceRecords ?? 24}"></div>
           <div class="form-group"><label>人工记录</label>
@@ -679,7 +669,6 @@ async function doCreate() {
 
   const mids = buildMids(
     document.getElementById('f_mid_vcs').value,
-    document.getElementById('f_mid_cs').value,
     document.getElementById('f_mid_vr').value,
     document.getElementById('f_mid_mr').value,
   );
@@ -688,12 +677,10 @@ async function doCreate() {
     await apiFetch('', { method: 'POST', body: JSON.stringify({ name, baseUrl, username, password, enabled, contents, mids }) });
     showMsg(msg, '已新增', 'success');
     // 清空表单
-    ['f_name','f_baseUrl','f_username','f_password','f_mid_vcs','f_mid_cs','f_mid_vr','f_mid_mr'].forEach(id => {
+    ['f_name','f_baseUrl','f_username','f_password','f_mid_vcs','f_mid_vr','f_mid_mr'].forEach(id => {
       document.getElementById(id).value = '';
     });
-    document.querySelectorAll('input[name="add_contents"]').forEach(el => el.checked = false);
-    const handDialDefault = document.querySelector('input[name="add_contents"][value="handDialRecords"]');
-    if (handDialDefault) handDialDefault.checked = true;
+    document.querySelectorAll('input[name="add_contents"]').forEach(el => el.checked = true);
     document.getElementById('f_enabled').checked = false;
     await refreshList();
   } catch(e) {
@@ -718,7 +705,6 @@ async function doUpdate(id) {
   dto.contents = contents;
   dto.mids = buildMids(
     document.getElementById(`e_mid_vcs_${id}`).value,
-    document.getElementById(`e_mid_cs_${id}`).value,
     document.getElementById(`e_mid_vr_${id}`).value,
     document.getElementById(`e_mid_mr_${id}`).value,
   );
@@ -732,10 +718,9 @@ async function doUpdate(id) {
   }
 }
 
-function buildMids(vcs, cs, vr, mr) {
+function buildMids(vcs, vr, mr) {
   const mids = {};
   if (vcs) mids.voiceCallStatus = parseInt(vcs, 10);
-  if (cs)  mids.concurrentStatus = parseInt(cs, 10);
   if (vr)  mids.voiceRecords = parseInt(vr, 10);
   if (mr)  mids.manualRecords = parseInt(mr, 10);
   return Object.keys(mids).length ? mids : undefined;

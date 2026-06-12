@@ -15,6 +15,7 @@ import {
 import type { Response } from 'express';
 import { join } from 'path';
 import { CrawlProfileService } from './crawl-profile.service';
+import { CrmRequestSchedulerService } from './crm-request-scheduler.service';
 import { CreateCrawlProfileDto } from './dto/create-crawl-profile.dto';
 import { UpdateCrawlProfileDto } from './dto/update-crawl-profile.dto';
 import { SetEnabledDto } from './dto/set-enabled.dto';
@@ -47,7 +48,32 @@ function parseRequestToken(req: Request | undefined): string | undefined {
 
 @Controller('crawl-profiles')
 export class CrawlProfileController {
-  constructor(private readonly service: CrawlProfileService) {}
+  constructor(
+    private readonly service: CrawlProfileService,
+    private readonly scheduler: CrmRequestSchedulerService,
+  ) {}
+
+  // ──── 调度时间窗口控制 ────
+
+  @Post('scheduler/force-enable')
+  @UseGuards(CrawlAdminGuard)
+  @HttpCode(200)
+  schedulerForceEnable() {
+    return this.scheduler.setForceEnabled(true);
+  }
+
+  @Post('scheduler/force-disable')
+  @UseGuards(CrawlAdminGuard)
+  @HttpCode(200)
+  schedulerForceDisable() {
+    return this.scheduler.setForceEnabled(false);
+  }
+
+  @Get('scheduler/status')
+  @UseGuards(CrawlAdminGuard)
+  schedulerStatus() {
+    return this.scheduler.getSchedulerStatus();
+  }
 
   // ──── 页面 ────
 

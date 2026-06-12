@@ -25,6 +25,48 @@ export class TelegramNotifyService {
     await this.broadcast(text, `人工验证通知 → ${profile.name} (${crmUrl})`);
   }
 
+  /**
+   * 汇总播报：任意 profile 进入人工验证时，把所有 profile 的状态一起发送
+   * human_check_required 条目会附带完整地址链接
+   */
+  async notifyHumanCheckRequiredBatch(allProfiles: CrawlProfile[]): Promise<void> {
+    const statusIcon: Record<string, string> = {
+      ok: '✅',
+      human_check_required: '⚠️',
+      login_failed: '❌',
+      unknown: '❓',
+    };
+
+    const lines: string[] = [
+      '⚠️ <b>CRM 需要人工验证</b>',
+      '',
+      '📋 全部任务状态：',
+    ];
+
+    for (const p of allProfiles) {
+      const icon = statusIcon[p.authStatus] ?? '❓';
+      const crmUrl = this.normalizeCrmUrl(p.baseUrl);
+      const host = (() => {
+        try { return new URL(crmUrl).host; } catch { return p.baseUrl; }
+      })();
+
+      if (p.authStatus === 'human_check_required') {
+        lines.push(`• <b>${this.escapeHtml(p.name)}</b> ${icon} 需人工验证`);
+        lines.push(`  地址：<a href="${this.escapeHtml(crmUrl)}">${this.escapeHtml(crmUrl)}</a>`);
+      } else {
+        lines.push(`• <b>${this.escapeHtml(p.name)}</b> ${icon} (${this.escapeHtml(host)})`);
+      }
+    }
+
+    lines.push('');
+    lines.push('请打开 CRM 完成登录/验证，并保持浏览器插件开启。');
+
+    const needCheck = allProfiles.filter((p) => p.authStatus === 'human_check_required');
+    const logLabel = needCheck.map((p) => p.name).join(', ');
+
+    await this.broadcast(lines.join('\n'), `人工验证汇总通知 → ${logLabel}`);
+  }
+
   /** 人工验证已处理、认证恢复时发送 Telegram 通知 */
   async notifyHumanCheckResolved(profile: CrawlProfile): Promise<void> {
     const crmUrl = this.normalizeCrmUrl(profile.baseUrl);

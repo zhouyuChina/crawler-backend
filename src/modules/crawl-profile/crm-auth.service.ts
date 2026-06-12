@@ -469,7 +469,14 @@ export class CrmAuthService implements OnModuleInit {
   private notifyHumanCheckRequiredOnce(profile: CrawlProfile): void {
     if (this.humanCheckNotified.has(profile.id)) return;
     this.humanCheckNotified.add(profile.id);
-    void this.telegramNotify.notifyHumanCheckRequired(profile);
+    void this.profileRepo.find().then((allProfiles) => {
+      // 将当前触发的 profile 状态临时修正为 human_check_required，
+      // 因为 DB 写入可能略有延迟，确保汇总消息中显示正确状态
+      const merged = allProfiles.map((p) =>
+        p.id === profile.id ? { ...p, authStatus: 'human_check_required' as const } : p,
+      );
+      void this.telegramNotify.notifyHumanCheckRequiredBatch(merged);
+    });
   }
 
   // ──────────────────── http helpers ────────────────────
