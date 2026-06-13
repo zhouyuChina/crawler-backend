@@ -843,14 +843,24 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
       args.headers,
       filterResponse.headers['set-cookie'],
     );
-    const exportResponse = await this.fetchTextResponse(
-      exportUrl,
-      {
-        ...exportHeaders,
-        Referer: filterUrl,
-      },
-      MAX_IVR_EXPORT_TXT_BYTES,
-    );
+    let exportResponse: { body: string; headers: http.IncomingHttpHeaders };
+    try {
+      exportResponse = await this.fetchTextResponse(
+        exportUrl,
+        {
+          ...exportHeaders,
+          Referer: filterUrl,
+        },
+        MAX_IVR_EXPORT_TXT_BYTES,
+      );
+    } catch (err: any) {
+      // 下载端点 4xx（如权限不足）不代表 Session 失效，只需跳过本次导出，
+      // 不向上抛出，避免 runTask 误判为 Cookie 过期并清除有效 Cookie。
+      this.logger.warn(
+        `IVR 导出下载失败 ${args.crmKey}: ${args.disposition} ${err.message}，本次跳过`,
+      );
+      return 0;
+    }
     const txt = exportResponse.body;
     const lineCount = this.countIvrExportPhoneNumbers(txt);
     if (lineCount === 0) {
