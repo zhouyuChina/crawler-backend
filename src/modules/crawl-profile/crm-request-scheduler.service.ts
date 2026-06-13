@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CrawlProfile, CrawlContent } from './crawl-profile.entity';
@@ -53,9 +53,6 @@ export class CrmRequestSchedulerService implements OnModuleInit, OnModuleDestroy
   private readonly stateMap = new Map<string, TaskState>();
   private memoryProbeTimer?: NodeJS.Timeout;
 
-  /** 强制开关：为 true 时在非营业时段也继续调度，15:10 自动重置 */
-  private forceEnabled = false;
-
   constructor(
     @InjectRepository(CrawlProfile)
     private readonly profileRepo: Repository<CrawlProfile>,
@@ -99,8 +96,6 @@ export class CrmRequestSchedulerService implements OnModuleInit, OnModuleDestroy
    */
   @Cron('*/1 * * * * *')
   async tick() {
-    if (!this.forceEnabled && !this.isWithinBusinessHours()) return;
-
     const profiles = await this.getEnabledProfiles();
     if (profiles.length === 0) return;
 
@@ -142,27 +137,6 @@ export class CrmRequestSchedulerService implements OnModuleInit, OnModuleDestroy
     }
 
     // 更新数据库 lastRunAt（粗粒度，每次 tick 如有启用配置就更新）
-  }
-
-  /** 北京时间 15:10 自动关闭强制开关 */
-  @Cron('0 10 15 * * *', { timeZone: 'Asia/Shanghai' })
-  autoDisableForce() {
-    if (this.forceEnabled) {
-      this.forceEnabled = false;
-      this.logger.log('强制开关已在 15:10 (BJT) 自动关闭');
-    }
-  }
-
-  /** 设置强制开关，返回当前状态快照（供 Controller 响应） */
-  setForceEnabled(value: boolean): { forceEnabled: boolean; isBusinessHours: boolean } {
-    this.forceEnabled = value;
-    this.logger.log(`强制开关 → ${value}`);
-    return { forceEnabled: this.forceEnabled, isBusinessHours: this.isWithinBusinessHours() };
-  }
-
-  /** 返回当前调度状态快照 */
-  getSchedulerStatus(): { forceEnabled: boolean; isBusinessHours: boolean } {
-    return { forceEnabled: this.forceEnabled, isBusinessHours: this.isWithinBusinessHours() };
   }
 
   /** 通知调度器某个 profile 的配置已变更（立即生效） */
@@ -222,13 +196,4 @@ export class CrmRequestSchedulerService implements OnModuleInit, OnModuleDestroy
     return this.cachedProfiles;
   }
 
-  /**
-   * 判断当前是否在北京时间营业时段（08:45 - 15:10）
-   * 直接用 UTC 偏移 +8 计算，无需 moment-timezone 等三方库
-   */
-  private isWithinBusinessHours(): boolean {
-    const now = new Date();
-    const bjTotalMin = ((now.getUTCHours() + 8) % 24) * 60 + now.getUTCMinutes();
-    return bjTotalMin >= 8 * 60 + 45 && bjTotalMin < 15 * 60 + 10;
-  }
 }
