@@ -843,6 +843,14 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
       args.headers,
       filterResponse.headers['set-cookie'],
     );
+    if (!this.hasIvrBrowserSecurityCookies(exportHeaders)) {
+      this.logger.warn(
+        `IVR 导出缺少浏览器安全 Cookie ${args.crmKey}: ${args.disposition} cookies=${this.describeCookieNames(
+          exportHeaders,
+        )}，需要插件同步后再下载`,
+      );
+      throw new Error('IVR_EXPORT_BROWSER_COOKIE_REQUIRED');
+    }
     let exportResponse: { body: string; headers: http.IncomingHttpHeaders };
     try {
       exportResponse = await this.fetchTextResponse(
@@ -854,14 +862,24 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
         MAX_IVR_EXPORT_TXT_BYTES,
       );
     } catch (err: any) {
-      // 下载端点 4xx（如权限不足）不代表 Session 失效，只需跳过本次导出，
-      // 不向上抛出，避免 runTask 误判为 Cookie 过期并清除有效 Cookie。
-      this.logger.warn(
-        `IVR 导出下载失败 ${args.crmKey}: ${args.disposition} ${err.message}，本次跳过`,
+      const message = String(err?.message ?? err).replace(
+        /HTTP\s+(\d+)/g,
+        'status $1',
       );
-      return 0;
+      this.logger.warn(
+        `IVR 导出下载失败 ${args.crmKey}: ${args.disposition} ${message}`,
+      );
+      throw new Error(`IVR_EXPORT_DOWNLOAD_FAILED: ${args.disposition}`);
     }
     const txt = exportResponse.body;
+    if (this.looksLikeIvrExportSecurityChallenge(txt)) {
+      this.logger.warn(
+        `IVR 导出被安全验证拦截 ${args.crmKey}: ${args.disposition} cookies=${this.describeCookieNames(
+          exportHeaders,
+        )}`,
+      );
+      throw new Error('IVR_EXPORT_SECURITY_CHALLENGE');
+    }
     const lineCount = this.countIvrExportPhoneNumbers(txt);
     if (lineCount === 0) {
       this.logger.log(
@@ -1866,6 +1884,40 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
       count++;
     }
     return count;
+  }
+
+  private hasIvrBrowserSecurityCookies(headers: Headers): boolean {
+    return (
+      this.hasCookie(headers, 'x-token') &&
+      this.hasCookie(headers, 'reqId')
+    );
+  }
+
+  private hasCookie(headers: Headers, cookieName: string): boolean {
+    const cookie = headers.Cookie ?? headers.cookie ?? '';
+    const expectedPrefix = `${cookieName.toLowerCase()}=`;
+    return cookie
+      .split(';')
+      .some((part) => part.trim().toLowerCase().startsWith(expectedPrefix));
+  }
+
+  private describeCookieNames(headers: Headers): string {
+    const cookie = headers.Cookie ?? headers.cookie ?? '';
+    const names = cookie
+      .split(';')
+      .map((part) => part.trim().split('=')[0])
+      .filter(Boolean);
+    return names.length > 0 ? names.join(',') : '-';
+  }
+
+  private looksLikeIvrExportSecurityChallenge(body: string): boolean {
+    const sample = body.slice(0, 4000);
+    if (/安全验证|安全驗證|真人校验|真人校驗/i.test(sample)) return true;
+    if (/verify\.html|timeout\.php/i.test(sample)) return true;
+    if (/^\s*(?:<!doctype\s+html>|<html\b)/i.test(sample)) {
+      return /login\.php|verify_key|password/i.test(sample);
+    }
+    return false;
   }
 
   private buildIvrExportFilePath(args: {
