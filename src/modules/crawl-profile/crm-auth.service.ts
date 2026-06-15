@@ -16,6 +16,8 @@ interface LoginResult {
 /** 每个 profile 的 Cookie 缓存 */
 const cookieCache = new Map<string, { cookies: string; expiresAt: number }>();
 const COOKIE_TTL_MS = 30 * 60 * 1000; // 30 分钟
+const CRM_BROWSER_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36';
 
 /** 登录锁：同一 profile 同时只允许一个登录请求在飞，避免并发重复登录 */
 const loginLock = new Map<string, Promise<string | null>>();
@@ -214,6 +216,46 @@ export class CrmAuthService implements OnModuleInit {
     return !!cached && Date.now() < cached.expiresAt;
   }
 
+  /** 手动 run-once 前预热语音呼叫状态页，复用浏览器菜单里的真实 mid */
+  async warmupVoiceCallStatus(profile: CrawlProfile): Promise<boolean> {
+    const cookieHeader = await this.getCookies(profile);
+    if (!cookieHeader) return false;
+
+    const baseUrl = profile.baseUrl;
+    const monitorUrl = await this.resolveVoiceCallStatusUrl(baseUrl, cookieHeader);
+
+    try {
+      const monitorResult = await this.httpGet(monitorUrl, {
+        Accept:
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        Cookie: cookieHeader,
+        Referer: `${baseUrl}/modules/index.php`,
+        'User-Agent': CRM_BROWSER_USER_AGENT,
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Upgrade-Insecure-Requests': '1',
+      });
+
+      if (
+        monitorResult.statusCode < 400 &&
+        !this.looksLikeAuthFailure(monitorResult.body)
+      ) {
+        this.updateCookiesFromSetCookie(profile.id, monitorResult.setCookies);
+        this.logger.debug(
+          `手动执行前预热 cc_monitor 成功 ${baseUrl}: status=${monitorResult.statusCode}`,
+        );
+        return true;
+      }
+
+      this.logger.warn(
+        `手动执行前预热 cc_monitor 返回异常 ${baseUrl}: status=${monitorResult.statusCode}`,
+      );
+    } catch (err: any) {
+      this.logger.warn(`手动执行前预热 cc_monitor 失败 ${baseUrl}: ${err.message}`);
+    }
+
+    return false;
+  }
+
   /** 像浏览器一样吸收响应 Set-Cookie，保持服务器侧 Cookie 持续更新 */
   updateCookiesFromSetCookie(profileId: string, setCookies: string[]): string | null {
     const cached = cookieCache.get(profileId);
@@ -297,7 +339,7 @@ export class CrmAuthService implements OnModuleInit {
         loginCookies.length > 0
       ) {
         const cookieStr = await this.refreshCookiesAfterLogin(
-          baseUrl,
+          profile,
           initialCookies,
           loginCookies,
         );
@@ -404,20 +446,53 @@ export class CrmAuthService implements OnModuleInit {
   }
 
   private async refreshCookiesAfterLogin(
-    baseUrl: string,
+    profile: CrawlProfile,
     initialCookies: string[],
     loginCookies: string[],
   ): Promise<string> {
+    const baseUrl = profile.baseUrl;
     const mergedLoginCookies = [...initialCookies, ...loginCookies];
-    const cookieHeader = this.cookiesToHeader(mergedLoginCookies);
+    let cookieHeader = this.cookiesToHeader(mergedLoginCookies);
+    const monitorUrl = await this.resolveVoiceCallStatusUrl(baseUrl, cookieHeader);
     const refreshUrl = `${baseUrl}/modules/get_peer_status.php?date=${Date.now()}`;
 
     try {
-      const refreshResult = await this.httpGet(refreshUrl, {
+      const monitorResult = await this.httpGet(monitorUrl, {
         Accept:
-          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         Cookie: cookieHeader,
         Referer: `${baseUrl}/modules/index.php`,
+        'User-Agent': CRM_BROWSER_USER_AGENT,
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Upgrade-Insecure-Requests': '1',
+      });
+
+      if (
+        monitorResult.statusCode < 400 &&
+        !this.looksLikeAuthFailure(monitorResult.body)
+      ) {
+        cookieHeader = this.cookiesToHeader([
+          ...cookieHeader.split(';').map((part) => part.trim()),
+          ...monitorResult.setCookies,
+        ]);
+        this.logger.debug(
+          `登录后预热 cc_monitor 成功 ${baseUrl}: status=${monitorResult.statusCode}`,
+        );
+      } else {
+        this.logger.warn(
+          `登录后预热 cc_monitor 返回异常 ${baseUrl}: status=${monitorResult.statusCode}`,
+        );
+      }
+    } catch (err: any) {
+      this.logger.warn(`登录后预热 cc_monitor 失败 ${baseUrl}: ${err.message}`);
+    }
+
+    try {
+      const refreshResult = await this.httpGet(refreshUrl, {
+        Accept: '*/*',
+        Cookie: cookieHeader,
+        Referer: `${baseUrl}/modules/index.php`,
+        'User-Agent': CRM_BROWSER_USER_AGENT,
         'Accept-Language': 'zh-CN,zh;q=0.9',
       });
 
@@ -426,7 +501,7 @@ export class CrmAuthService implements OnModuleInit {
         !this.looksLikeAuthFailure(refreshResult.body)
       ) {
         const refreshedCookieHeader = this.cookiesToHeader([
-          ...mergedLoginCookies,
+          ...cookieHeader.split(';').map((part) => part.trim()),
           ...refreshResult.setCookies,
         ]);
         this.logger.debug(
@@ -445,6 +520,67 @@ export class CrmAuthService implements OnModuleInit {
     }
 
     return cookieHeader;
+  }
+
+  private async resolveVoiceCallStatusUrl(
+    baseUrl: string,
+    cookieHeader: string,
+  ): Promise<string> {
+    const fallback = `${baseUrl}/modules/cc_monitor/`;
+
+    try {
+      const menuResult = await this.httpGet(
+        `${baseUrl}/modules/menu.php?etc=${Date.now()}`,
+        {
+          Accept: '*/*',
+          Cookie: cookieHeader,
+          Referer: `${baseUrl}/modules/index.php`,
+          'User-Agent': CRM_BROWSER_USER_AGENT,
+          'Accept-Language': 'zh-CN,zh;q=0.9',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+      );
+      const menuUrl = this.extractMenuUrl(menuResult.body, [
+        '語音呼叫狀態',
+        '语音呼叫状态',
+      ]);
+      if (menuUrl) {
+        return this.toAbsoluteCrmUrl(baseUrl, menuUrl);
+      }
+    } catch (err: any) {
+      this.logger.warn(`登录后解析 cc_monitor 菜单失败 ${baseUrl}: ${err.message}`);
+    }
+
+    return fallback;
+  }
+
+  private extractMenuUrl(menuXml: string, itemTexts: string[]): string | null {
+    for (const text of itemTexts) {
+      const pattern = new RegExp(
+        String.raw`<item\b[^>]*text=["']${this.escapeRegExp(text)}["'][\s\S]*?<userdata\b[^>]*name=["']url["'][^>]*>([\s\S]*?)<\/userdata>`,
+        'i',
+      );
+      const match = menuXml.match(pattern);
+      if (match?.[1]) {
+        return match[1]
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .trim();
+      }
+    }
+    return null;
+  }
+
+  private toAbsoluteCrmUrl(baseUrl: string, menuUrl: string): string {
+    const normalized = menuUrl.replace(/^\/+/, '');
+    const [path, query = ''] = normalized.split('?');
+    const directoryPath = path.endsWith('/') ? path : `${path}/`;
+    return `${baseUrl}/modules/${directoryPath}${query ? `?${query}` : ''}`;
+  }
+
+  private escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   private cookiesToHeader(cookies: string[]): string {

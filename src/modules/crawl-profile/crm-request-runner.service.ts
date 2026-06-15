@@ -27,7 +27,9 @@ interface TaskDef {
 type Headers = Record<string, string>;
 
 const SCHEDULER_REQUEST_TIMEOUT_MS = 30000;
-const SCHEDULER_RESPONSE_DRAIN_LIMIT_BYTES = 64 * 1024;
+const SCHEDULER_RESPONSE_DRAIN_LIMIT_BYTES = 2 * 1024 * 1024;
+const BROWSER_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36';
 
 const TASK_DEFS: Record<TaskKey, TaskDef> = {
   get_peer_status: {
@@ -47,10 +49,8 @@ const TASK_DEFS: Record<TaskKey, TaskDef> = {
   },
   cont_controler: {
     intervalMs: 20000,
-    buildUrl: (p) => {
-      const mid = p.mids?.voiceCallStatus ?? 9;
-      return `${p.baseUrl}/modules/cc_monitor/cont_controler.php?mid=${mid}&date=${Date.now()}`;
-    },
+    buildUrl: (p) =>
+      `${p.baseUrl}/modules/cc_monitor/cont_controler.php?muser=${encodeURIComponent(p.username)}&max=100&st_key=enable&st_type=desc&date=${Date.now()}&campnum=0`,
   },
   cc_mrcall: {
     intervalMs: 30000,
@@ -112,17 +112,7 @@ export class CrmRequestRunnerService {
     }
 
     const url = def.buildUrl(profile);
-    const headers = {
-      Accept:
-        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-      Cookie: cookies,
-      Referer: `${profile.baseUrl}/modules/index.php`,
-      'User-Agent':
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
-      'Accept-Language': 'zh-CN,zh;q=0.9',
-      'Accept-Encoding': 'identity',
-      'Upgrade-Insecure-Requests': '1',
-    };
+    const headers = this.buildBrowserLikeHeaders(profile, taskKey, cookies);
 
     try {
       if (taskKey === 'cc_voiceivr') {
@@ -203,6 +193,51 @@ export class CrmRequestRunnerService {
     return TASK_DEFS[taskKey];
   }
 
+  private buildBrowserLikeHeaders(
+    profile: CrawlProfile,
+    taskKey: TaskKey,
+    cookies: string,
+  ): Headers {
+    const headers: Headers = {
+      Accept: '*/*',
+      Cookie: cookies,
+      Referer: this.getBrowserReferer(profile, taskKey),
+      'User-Agent': BROWSER_USER_AGENT,
+      'Accept-Language': 'zh-CN,zh;q=0.9',
+      'Accept-Encoding': 'gzip, deflate',
+    };
+
+    if (this.isDocumentLikeTask(taskKey)) {
+      headers.Accept =
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7';
+      headers['Upgrade-Insecure-Requests'] = '1';
+    }
+
+    return headers;
+  }
+
+  private getBrowserReferer(profile: CrawlProfile, taskKey: TaskKey): string {
+    switch (taskKey) {
+      case 'get_curcall_in':
+        return `${profile.baseUrl}/modules/cc_monitor/curcall_in.php`;
+      case 'get_curcall_out':
+        return `${profile.baseUrl}/modules/cc_monitor/curcall_out.php`;
+      case 'cont_controler':
+        return `${profile.baseUrl}/modules/cc_monitor/controler.php`;
+      default:
+        return `${profile.baseUrl}/modules/index.php`;
+    }
+  }
+
+  private isDocumentLikeTask(taskKey: TaskKey): boolean {
+    return (
+      taskKey === 'cc_mrcall' ||
+      taskKey === 'cc_voiceivr' ||
+      taskKey === 'cc_voiceivr_initial_refresh' ||
+      taskKey === 'cc_voiceop' ||
+      taskKey === 'dm_voiceop'
+    );
+  }
   private runLightweightGet(
     url: string,
     headers: Headers,

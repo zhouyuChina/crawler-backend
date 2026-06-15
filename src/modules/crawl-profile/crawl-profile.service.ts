@@ -149,6 +149,8 @@ export class CrawlProfileService {
     const triggered: string[] = [];
     const skipped: string[] = [];
 
+    await this.crmAuthService.warmupVoiceCallStatus(profile);
+
     for (const taskKey of taskKeys) {
       try {
         await this.runner.runTask(profile, taskKey);
