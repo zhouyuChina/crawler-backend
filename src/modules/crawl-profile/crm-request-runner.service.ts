@@ -180,16 +180,8 @@ export class CrmRequestRunnerService {
           throw new Error(`HTTP ${statusCode}: ${url}`);
         }
         this.crmAuthService.updateCookiesFromSetCookie(profile.id, setCookies);
-        if (taskKey === 'get_peer_status') {
-          this.logger.debug(
-            `${profile.name}(${taskKey}): body length=${body.length} body=${JSON.stringify(body)} cookie=${cookies?.slice(0, 200)}`,
-          );
-        }
         // 推送原始响应体到内存快照，并通过 WS 实时广播
         this.callRecordService.pushRawRecord(profile.baseUrl, taskKey, body);
-        if (taskKey === 'get_peer_status') {
-          this.logger.debug(`${profile.name}(${taskKey}): 普通请求完成`);
-        }
       }
     } catch (err: any) {
       // Cookie 可能过期，下次重新登录
@@ -222,20 +214,6 @@ export class CrmRequestRunnerService {
       const chunks: Buffer[] = [];
       let receivedBytes = 0;
       let settled = false;
-      const requestCookie = headers.Cookie ?? headers.cookie ?? '';
-      const isGetPeerStatus = parsed.pathname.endsWith(
-        '/modules/get_peer_status.php',
-      );
-
-      if (isGetPeerStatus) {
-        console.log(
-          `[runLightweightGet] get_peer_status request cookie=${requestCookie}`,
-        );
-        console.log(
-          `[runLightweightGet] get_peer_status cookie-check PHPSESSID=${requestCookie.includes('PHPSESSID=')} USER_LANG=${requestCookie.includes('USER_LANG=')} COOKIE_USER_ID=${requestCookie.includes('COOKIE_USER_ID=')}`,
-        );
-      }
-
       const settle = (
         result: { statusCode: number; body: string; setCookies: string[] } | null,
         err?: Error,
@@ -258,14 +236,6 @@ export class CrmRequestRunnerService {
         (res) => {
           const statusCode = res.statusCode || 0;
           const setCookies = (res.headers['set-cookie'] ?? []) as string[];
-          const contentEncoding = res.headers['content-encoding'] ?? 'none';
-          const contentLength = res.headers['content-length'] ?? 'unknown';
-          const transferEncoding = res.headers['transfer-encoding'] ?? 'none';
-          if (isGetPeerStatus) {
-            console.log(
-              `[runLightweightGet] get_peer_status status=${statusCode} content-encoding=${contentEncoding} content-length=${contentLength} transfer-encoding=${transferEncoding} url=${url}`,
-            );
-          }
           res.on('data', (chunk: Buffer) => {
             receivedBytes += chunk.length;
             chunks.push(chunk);
