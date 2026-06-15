@@ -264,20 +264,18 @@ export class CrmAuthService implements OnModuleInit {
         },
       );
 
-      // 成功：302 跳转到 modules/index.php，且 Set-Cookie 包含 COOKIE_USER_ID
-      const allCookies = [
-        ...initialCookies,
-        ...postResult.setCookies,
-      ];
-      const hasCookieUserId = allCookies.some((c) =>
+      // 成功后只使用登录响应新下发的 Cookie；登录页初始 Cookie 不进入缓存。
+      const loginCookies = postResult.setCookies;
+      const hasCookieUserId = loginCookies.some((c) =>
         c.startsWith('COOKIE_USER_ID'),
       );
 
       if (
-        postResult.finalUrl?.includes('modules/index.php') ||
-        hasCookieUserId
+        (postResult.finalUrl?.includes('modules/index.php') ||
+          hasCookieUserId) &&
+        loginCookies.length > 0
       ) {
-        const cookieStr = this.cookiesToHeader(allCookies);
+        const cookieStr = this.cookiesToHeader(loginCookies);
         this.logger.log(`登录成功 ${baseUrl}`);
         return {
           success: true,
@@ -297,7 +295,7 @@ export class CrmAuthService implements OnModuleInit {
 
       // 否则账密错误
       this.logger.warn(
-        `登录失败 ${baseUrl} 账号=${username} status=${postResult.statusCode} finalUrl=${postResult.finalUrl ?? '-'} cookies=${allCookies
+        `登录失败 ${baseUrl} 账号=${username} status=${postResult.statusCode} finalUrl=${postResult.finalUrl ?? '-'} cookies=${loginCookies
           .map((c) => c.split('=')[0])
           .join(',') || '-'}`,
       );
@@ -381,10 +379,15 @@ export class CrmAuthService implements OnModuleInit {
   }
 
   private cookiesToHeader(cookies: string[]): string {
-    return cookies
-      .map((c) => c.split(';')[0])
-      .filter(Boolean)
-      .join('; ');
+    const byName = new Map<string, string>();
+    for (const cookie of cookies) {
+      const pair = cookie.split(';')[0]?.trim();
+      if (!pair) continue;
+      const eqIndex = pair.indexOf('=');
+      if (eqIndex <= 0) continue;
+      byName.set(pair.slice(0, eqIndex), pair);
+    }
+    return [...byName.values()].join('; ');
   }
 
   private async markAuthOk(profile: CrawlProfile): Promise<boolean> {

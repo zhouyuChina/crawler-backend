@@ -178,7 +178,7 @@ export class CrmRequestRunnerService {
         }
         this.crmAuthService.touchCookies(profile.id);
         this.logger.debug(
-          `${profile.name}(${taskKey}): body length=${body.length} preview=${JSON.stringify(body.slice(0, 120))}`,
+          `${profile.name}(${taskKey}): body length=${body.length} preview=${JSON.stringify(body.slice(0, 120))} cookie=${cookies?.slice(0, 200)}`,
         );
         // 推送原始响应体到内存快照，并通过 WS 实时广播
         this.callRecordService.pushRawRecord(profile.baseUrl, taskKey, body);
@@ -237,6 +237,12 @@ export class CrmRequestRunnerService {
         },
         (res) => {
           const statusCode = res.statusCode || 0;
+          const contentEncoding = res.headers['content-encoding'] ?? 'none';
+          const contentLength = res.headers['content-length'] ?? 'unknown';
+          const transferEncoding = res.headers['transfer-encoding'] ?? 'none';
+          console.log(
+            `[runLightweightGet] status=${statusCode} content-encoding=${contentEncoding} content-length=${contentLength} transfer-encoding=${transferEncoding} url=${url}`,
+          );
           res.on('data', (chunk: Buffer) => {
             receivedBytes += chunk.length;
             chunks.push(chunk);
