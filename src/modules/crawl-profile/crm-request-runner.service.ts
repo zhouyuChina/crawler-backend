@@ -215,6 +215,16 @@ export class CrmRequestRunnerService {
       const chunks: Buffer[] = [];
       let receivedBytes = 0;
       let settled = false;
+      const requestCookie = headers.Cookie ?? headers.cookie ?? '';
+
+      if (parsed.pathname.endsWith('/modules/get_peer_status.php')) {
+        console.log(
+          `[runLightweightGet] get_peer_status request cookie=${requestCookie}`,
+        );
+        console.log(
+          `[runLightweightGet] get_peer_status cookie-check PHPSESSID=${requestCookie.includes('PHPSESSID=')} USER_LANG=${requestCookie.includes('USER_LANG=')} COOKIE_USER_ID=${requestCookie.includes('COOKIE_USER_ID=')}`,
+        );
+      }
 
       const settle = (
         result: { statusCode: number; body: string } | null,

@@ -264,7 +264,6 @@ export class CrmAuthService implements OnModuleInit {
         },
       );
 
-      // 成功后只使用登录响应新下发的 Cookie；登录页初始 Cookie 不进入缓存。
       const loginCookies = postResult.setCookies;
       const hasCookieUserId = loginCookies.some((c) =>
         c.startsWith('COOKIE_USER_ID'),
@@ -275,7 +274,11 @@ export class CrmAuthService implements OnModuleInit {
           hasCookieUserId) &&
         loginCookies.length > 0
       ) {
-        const cookieStr = this.cookiesToHeader(loginCookies);
+        const cookieStr = await this.refreshCookiesAfterLogin(
+          baseUrl,
+          initialCookies,
+          loginCookies,
+        );
         this.logger.log(`登录成功 ${baseUrl}`);
         return {
           success: true,
@@ -376,6 +379,50 @@ export class CrmAuthService implements OnModuleInit {
 
     const scriptMatch = html.match(/verify_key['":\s]*['"]([a-zA-Z0-9_-]+)['"]/);
     return scriptMatch ? scriptMatch[1] : null;
+  }
+
+  private async refreshCookiesAfterLogin(
+    baseUrl: string,
+    initialCookies: string[],
+    loginCookies: string[],
+  ): Promise<string> {
+    const mergedLoginCookies = [...initialCookies, ...loginCookies];
+    const cookieHeader = this.cookiesToHeader(mergedLoginCookies);
+    const refreshUrl = `${baseUrl}/modules/get_peer_status.php?date=${Date.now()}`;
+
+    try {
+      const refreshResult = await this.httpGet(refreshUrl, {
+        Accept:
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        Cookie: cookieHeader,
+        Referer: `${baseUrl}/modules/index.php`,
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+      });
+
+      if (
+        refreshResult.statusCode < 400 &&
+        !this.looksLikeAuthFailure(refreshResult.body)
+      ) {
+        const refreshedCookieHeader = this.cookiesToHeader([
+          ...mergedLoginCookies,
+          ...refreshResult.setCookies,
+        ]);
+        this.logger.debug(
+          `登录后刷新 Cookie 成功 ${baseUrl}: status=${refreshResult.statusCode} setCookies=${refreshResult.setCookies
+            .map((c) => c.split('=')[0])
+            .join(',') || '-'}`,
+        );
+        return refreshedCookieHeader;
+      }
+
+      this.logger.warn(
+        `登录后刷新 Cookie 返回异常 ${baseUrl}: status=${refreshResult.statusCode}`,
+      );
+    } catch (err: any) {
+      this.logger.warn(`登录后刷新 Cookie 失败 ${baseUrl}: ${err.message}`);
+    }
+
+    return cookieHeader;
   }
 
   private cookiesToHeader(cookies: string[]): string {
