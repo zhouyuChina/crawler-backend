@@ -526,18 +526,14 @@ export class WebsocketGateway
    * @param crmKey  抓取来源，e.g. "http://x.x.x.x:port"
    * @param recordType  任务类型，e.g. "get_curcall_in"
    * @param rawBody  原始响应体（已限制 ≤ 64KB）
-   * @param changed  true 表示内容有变化，需要广播；false 只更新快照，不广播
    */
   updateAndBroadcastCallRecord(
     crmKey: string,
     recordType: string,
     rawBody: string,
-    changed: boolean,
   ) {
     const capturedAt = new Date().toISOString();
     this.callRecordLatestMap.set(`${crmKey}:${recordType}`, { rawBody, capturedAt });
-
-    if (!changed) return;
 
     const payload = {
       crmKey,

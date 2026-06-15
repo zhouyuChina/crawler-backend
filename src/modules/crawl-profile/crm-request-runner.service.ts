@@ -176,7 +176,7 @@ export class CrmRequestRunnerService {
           throw new Error(`HTTP ${statusCode}: ${url}`);
         }
         this.crmAuthService.touchCookies(profile.id);
-        // 推送原始响应体到内存快照，内容变化时 WS 广播
+        // 推送原始响应体到内存快照，并通过 WS 实时广播
         this.callRecordService.pushRawRecord(profile.baseUrl, taskKey, body);
         this.logger.debug(`${profile.name}(${taskKey}): 普通请求完成`);
       }

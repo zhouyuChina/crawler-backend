@@ -269,7 +269,7 @@ export class CallRecordService {
   }
 
   /**
-   * 由调度器轻量 GET 完成后调用：更新内存快照，内容变化时通过 WS 推送。
+   * 由调度器轻量 GET 完成后调用：更新内存快照，并通过 WS 直接推送。
    *
    * @param crmKey   profile.baseUrl，e.g. "http://x.x.x.x:port"
    * @param recordType  任务类型，e.g. "get_curcall_in"
@@ -277,21 +277,12 @@ export class CallRecordService {
    */
   pushRawRecord(crmKey: string, recordType: string, rawBody: string): void {
     const mapKey = `${crmKey}:${recordType}`;
-    const newHash = this.hashContent(rawBody);
-    const prevHash = this.lastRecordContentHashes.get(mapKey);
-    const changed = prevHash !== newHash;
-
-    if (changed) {
-      this.lastRecordContentHashes.set(mapKey, newHash);
-    }
-
     const capturedAt = new Date().toISOString();
     this.latestBodyMap.set(mapKey, { rawBody, capturedAt });
     this.websocketGateway.updateAndBroadcastCallRecord(
       crmKey,
       recordType,
       rawBody,
-      changed,
     );
   }
 
