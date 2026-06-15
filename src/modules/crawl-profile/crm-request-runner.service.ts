@@ -177,6 +177,9 @@ export class CrmRequestRunnerService {
           throw new Error(`HTTP ${statusCode}: ${url}`);
         }
         this.crmAuthService.touchCookies(profile.id);
+        this.logger.debug(
+          `${profile.name}(${taskKey}): body length=${body.length} preview=${JSON.stringify(body.slice(0, 120))}`,
+        );
         // 推送原始响应体到内存快照，并通过 WS 实时广播
         this.callRecordService.pushRawRecord(profile.baseUrl, taskKey, body);
         this.logger.debug(`${profile.name}(${taskKey}): 普通请求完成`);
@@ -236,6 +239,7 @@ export class CrmRequestRunnerService {
           const statusCode = res.statusCode || 0;
           res.on('data', (chunk: Buffer) => {
             receivedBytes += chunk.length;
+            chunks.push(chunk);
             if (receivedBytes > SCHEDULER_RESPONSE_DRAIN_LIMIT_BYTES) {
               // 超大响应：截断并立刻 settle，然后销毁连接
               req.destroy();
@@ -243,9 +247,7 @@ export class CrmRequestRunnerService {
                 statusCode,
                 body: Buffer.concat(chunks).toString('utf8'),
               });
-              return;
             }
-            chunks.push(chunk);
           });
           res.on('end', () => {
             settle({
