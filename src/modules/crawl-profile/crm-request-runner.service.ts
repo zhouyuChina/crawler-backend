@@ -172,17 +172,24 @@ export class CrmRequestRunnerService {
         this.crmAuthService.touchCookies(profile.id);
         this.logger.debug(`${profile.name}(${taskKey}): 表格抓取已触发`);
       } else {
-        const { statusCode, body } = await this.runLightweightGet(url, headers);
+        const { statusCode, body, setCookies } = await this.runLightweightGet(
+          url,
+          headers,
+        );
         if (statusCode >= 400) {
           throw new Error(`HTTP ${statusCode}: ${url}`);
         }
-        this.crmAuthService.touchCookies(profile.id);
-        this.logger.debug(
-          `${profile.name}(${taskKey}): body length=${body.length} preview=${JSON.stringify(body.slice(0, 120))} cookie=${cookies?.slice(0, 200)}`,
-        );
+        this.crmAuthService.updateCookiesFromSetCookie(profile.id, setCookies);
+        if (taskKey === 'get_peer_status') {
+          this.logger.debug(
+            `${profile.name}(${taskKey}): body length=${body.length} body=${JSON.stringify(body)} cookie=${cookies?.slice(0, 200)}`,
+          );
+        }
         // 推送原始响应体到内存快照，并通过 WS 实时广播
         this.callRecordService.pushRawRecord(profile.baseUrl, taskKey, body);
-        this.logger.debug(`${profile.name}(${taskKey}): 普通请求完成`);
+        if (taskKey === 'get_peer_status') {
+          this.logger.debug(`${profile.name}(${taskKey}): 普通请求完成`);
+        }
       }
     } catch (err: any) {
       // Cookie 可能过期，下次重新登录
@@ -207,7 +214,7 @@ export class CrmRequestRunnerService {
   private runLightweightGet(
     url: string,
     headers: Headers,
-  ): Promise<{ statusCode: number; body: string }> {
+  ): Promise<{ statusCode: number; body: string; setCookies: string[] }> {
     return new Promise((resolve, reject) => {
       const parsed = new URL(url);
       const isHttps = parsed.protocol === 'https:';
@@ -216,8 +223,11 @@ export class CrmRequestRunnerService {
       let receivedBytes = 0;
       let settled = false;
       const requestCookie = headers.Cookie ?? headers.cookie ?? '';
+      const isGetPeerStatus = parsed.pathname.endsWith(
+        '/modules/get_peer_status.php',
+      );
 
-      if (parsed.pathname.endsWith('/modules/get_peer_status.php')) {
+      if (isGetPeerStatus) {
         console.log(
           `[runLightweightGet] get_peer_status request cookie=${requestCookie}`,
         );
@@ -227,7 +237,7 @@ export class CrmRequestRunnerService {
       }
 
       const settle = (
-        result: { statusCode: number; body: string } | null,
+        result: { statusCode: number; body: string; setCookies: string[] } | null,
         err?: Error,
       ) => {
         if (settled) return;
@@ -247,12 +257,15 @@ export class CrmRequestRunnerService {
         },
         (res) => {
           const statusCode = res.statusCode || 0;
+          const setCookies = (res.headers['set-cookie'] ?? []) as string[];
           const contentEncoding = res.headers['content-encoding'] ?? 'none';
           const contentLength = res.headers['content-length'] ?? 'unknown';
           const transferEncoding = res.headers['transfer-encoding'] ?? 'none';
-          console.log(
-            `[runLightweightGet] status=${statusCode} content-encoding=${contentEncoding} content-length=${contentLength} transfer-encoding=${transferEncoding} url=${url}`,
-          );
+          if (isGetPeerStatus) {
+            console.log(
+              `[runLightweightGet] get_peer_status status=${statusCode} content-encoding=${contentEncoding} content-length=${contentLength} transfer-encoding=${transferEncoding} url=${url}`,
+            );
+          }
           res.on('data', (chunk: Buffer) => {
             receivedBytes += chunk.length;
             chunks.push(chunk);
@@ -262,6 +275,7 @@ export class CrmRequestRunnerService {
               settle({
                 statusCode,
                 body: Buffer.concat(chunks).toString('utf8'),
+                setCookies,
               });
             }
           });
@@ -269,6 +283,7 @@ export class CrmRequestRunnerService {
             settle({
               statusCode,
               body: Buffer.concat(chunks).toString('utf8'),
+              setCookies,
             });
           });
         },

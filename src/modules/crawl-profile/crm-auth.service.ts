@@ -100,20 +100,23 @@ export class CrmAuthService implements OnModuleInit {
     return null;
   }
 
-  /** 强制重新登录（忽略缓存）；若已有插件同步的 Cookie 则直接视为成功 */
+  /** 强制重新登录（忽略缓存） */
   async forceLogin(profile: CrawlProfile): Promise<LoginResult> {
-    const cached = cookieCache.get(profile.id);
-    if (cached && Date.now() < cached.expiresAt) {
-      // 缓存命中不视为"重新登录"，不刷新 lastLoginAt
-      return {
-        success: true,
-        cookies: cached.cookies,
-        authStatus: 'ok',
-      };
+    cookieCache.delete(profile.id);
+    const existing = loginLock.get(profile.id);
+    if (existing) {
+      await existing;
     }
 
-    cookieCache.delete(profile.id);
-    const result = await this.login(profile);
+    const promise = this.login(profile).finally(() => {
+      loginLock.delete(profile.id);
+    });
+    loginLock.set(
+      profile.id,
+      promise.then((result) => result.cookies ?? null),
+    );
+
+    const result = await promise;
     if (result.success && result.cookies) {
       cookieCache.set(profile.id, {
         cookies: result.cookies,
@@ -209,6 +212,25 @@ export class CrmAuthService implements OnModuleInit {
   hasValidCookies(profileId: string): boolean {
     const cached = cookieCache.get(profileId);
     return !!cached && Date.now() < cached.expiresAt;
+  }
+
+  /** 像浏览器一样吸收响应 Set-Cookie，保持服务器侧 Cookie 持续更新 */
+  updateCookiesFromSetCookie(profileId: string, setCookies: string[]): string | null {
+    const cached = cookieCache.get(profileId);
+    if (!cached || setCookies.length === 0) {
+      this.touchCookies(profileId);
+      return cached?.cookies ?? null;
+    }
+
+    const cookies = this.mergeCookieHeaderWithSetCookies(cached.cookies, setCookies);
+    cookieCache.set(profileId, {
+      cookies,
+      expiresAt: Date.now() + COOKIE_TTL_MS,
+    });
+    if (cookies !== cached.cookies) {
+      this.onCookiesSynced?.(profileId);
+    }
+    return cookies;
   }
 
   // ──────────────────── internal ────────────────────
@@ -435,6 +457,16 @@ export class CrmAuthService implements OnModuleInit {
       byName.set(pair.slice(0, eqIndex), pair);
     }
     return [...byName.values()].join('; ');
+  }
+
+  private mergeCookieHeaderWithSetCookies(
+    cookieHeader: string,
+    setCookies: string[],
+  ): string {
+    return this.cookiesToHeader([
+      ...cookieHeader.split(';').map((part) => part.trim()),
+      ...setCookies,
+    ]);
   }
 
   private async markAuthOk(profile: CrawlProfile): Promise<boolean> {
