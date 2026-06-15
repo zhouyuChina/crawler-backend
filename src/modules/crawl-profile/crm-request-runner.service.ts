@@ -5,6 +5,7 @@ import { CrawlProfile } from './crawl-profile.entity';
 import { CrmAuthService } from './crm-auth.service';
 import * as http from 'http';
 import * as https from 'https';
+import * as zlib from 'zlib';
 
 export type TaskKey =
   | 'get_peer_status'
@@ -238,6 +239,27 @@ export class CrmRequestRunnerService {
       taskKey === 'dm_voiceop'
     );
   }
+  private decodeResponseBody(
+    buffer: Buffer,
+    contentEncoding: string,
+    allowCompressedFallback: boolean,
+  ): string {
+    try {
+      if (contentEncoding.includes('gzip')) {
+        return zlib.gunzipSync(buffer).toString('utf8');
+      }
+      if (contentEncoding.includes('deflate')) {
+        return zlib.inflateSync(buffer).toString('utf8');
+      }
+    } catch (err) {
+      if (!allowCompressedFallback) {
+        throw err;
+      }
+    }
+
+    return buffer.toString('utf8');
+  }
+
   private runLightweightGet(
     url: string,
     headers: Headers,
@@ -271,6 +293,16 @@ export class CrmRequestRunnerService {
         (res) => {
           const statusCode = res.statusCode || 0;
           const setCookies = (res.headers['set-cookie'] ?? []) as string[];
+          const contentEncoding = String(
+            res.headers['content-encoding'] ?? '',
+          ).toLowerCase();
+          const buildBody = (allowCompressedFallback: boolean) =>
+            this.decodeResponseBody(
+              Buffer.concat(chunks),
+              contentEncoding,
+              allowCompressedFallback,
+            );
+
           res.on('data', (chunk: Buffer) => {
             receivedBytes += chunk.length;
             chunks.push(chunk);
@@ -279,7 +311,7 @@ export class CrmRequestRunnerService {
               req.destroy();
               settle({
                 statusCode,
-                body: Buffer.concat(chunks).toString('utf8'),
+                body: buildBody(true),
                 setCookies,
               });
             }
@@ -287,7 +319,7 @@ export class CrmRequestRunnerService {
           res.on('end', () => {
             settle({
               statusCode,
-              body: Buffer.concat(chunks).toString('utf8'),
+              body: buildBody(false),
               setCookies,
             });
           });
