@@ -67,6 +67,46 @@ export class TelegramNotifyService {
     await this.broadcast(lines.join('\n'), `人工验证汇总通知 → ${logLabel}`);
   }
 
+  /** 检测到账密登录失败时发送 Telegram 汇总通知 */
+  async notifyLoginFailedBatch(allProfiles: CrawlProfile[]): Promise<void> {
+    const statusIcon: Record<string, string> = {
+      ok: '✅',
+      human_check_required: '⚠️',
+      login_failed: '❌',
+      unknown: '❓',
+    };
+
+    const lines: string[] = [
+      '❌ <b>CRM 登录失败</b>',
+      '',
+      '📋 全部任务状态：',
+    ];
+
+    for (const p of allProfiles) {
+      const icon = statusIcon[p.authStatus] ?? '❓';
+      const crmUrl = this.normalizeCrmUrl(p.baseUrl);
+      const host = (() => {
+        try { return new URL(crmUrl).host; } catch { return p.baseUrl; }
+      })();
+
+      if (p.authStatus === 'login_failed') {
+        lines.push(`• <b>${this.escapeHtml(p.name)}</b> ${icon} 登录失败`);
+        lines.push(`  地址：<a href="${this.escapeHtml(crmUrl)}">${this.escapeHtml(crmUrl)}</a>`);
+        lines.push(`  账号：${this.escapeHtml(p.username)}`);
+      } else {
+        lines.push(`• <b>${this.escapeHtml(p.name)}</b> ${icon} (${this.escapeHtml(host)})`);
+      }
+    }
+
+    lines.push('');
+    lines.push('请检查账号密码，或打开 CRM/插件同步有效 Cookie。');
+
+    const failed = allProfiles.filter((p) => p.authStatus === 'login_failed');
+    const logLabel = failed.map((p) => p.name).join(', ');
+
+    await this.broadcast(lines.join('\n'), `登录失败汇总通知 → ${logLabel}`);
+  }
+
   /** 人工验证已处理、认证恢复时发送 Telegram 通知 */
   async notifyHumanCheckResolved(profile: CrawlProfile): Promise<void> {
     const crmUrl = this.normalizeCrmUrl(profile.baseUrl);
