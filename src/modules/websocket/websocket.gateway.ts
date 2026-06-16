@@ -19,6 +19,17 @@ const ROOM_TABLE_CRAWL = 'table-crawl';
 /** 每 crmKey 房间前缀，e.g. "call-records:http://x.x.x.x:port" */
 const callRecordsRoom = (crmKey: string) => `call-records:${crmKey}`;
 const tableCrawlRoom = (crmKey: string) => `table-crawl:${crmKey}`;
+const normalizeCrmKey = (value: string): string => {
+  try {
+    return new URL(value).host.toLowerCase();
+  } catch {
+    return value.trim().toLowerCase();
+  }
+};
+const crmKeyRoomVariants = (crmKey: string, roomFactory: (key: string) => string) => {
+  const normalized = normalizeCrmKey(crmKey);
+  return Array.from(new Set([crmKey, normalized].filter(Boolean).map(roomFactory)));
+};
 
 interface CallRecordEntry {
   rawBody: string;
@@ -214,7 +225,9 @@ export class WebsocketGateway
     }
 
     for (const crmKey of keys) {
-      client.join(tableCrawlRoom(crmKey));
+      for (const room of crmKeyRoomVariants(crmKey, tableCrawlRoom)) {
+        client.join(room);
+      }
     }
     this.logger.log(
       `Client ${client.id} subscribed to table-crawl crmKeys=[${keys.join(',')}]`,
@@ -240,10 +253,11 @@ export class WebsocketGateway
     const leftRooms: string[] = [];
     if (keys.length > 0) {
       for (const crmKey of keys) {
-        const room = tableCrawlRoom(crmKey);
-        if (client.rooms.has(room)) {
-          client.leave(room);
-          leftRooms.push(room);
+        for (const room of crmKeyRoomVariants(crmKey, tableCrawlRoom)) {
+          if (client.rooms.has(room)) {
+            client.leave(room);
+            leftRooms.push(room);
+          }
         }
       }
     } else {
