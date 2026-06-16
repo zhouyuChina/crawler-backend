@@ -506,6 +506,33 @@ export class WebsocketGateway
     return `${normalizeCrmKey(crmKey)}|${module}|${mid}`;
   }
 
+  private formatCrmBeijingDateTime(value: unknown): string | null {
+    if (value == null) return null;
+    const date = value instanceof Date ? value : new Date(String(value));
+    if (Number.isNaN(date.getTime())) return null;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(
+      date.getUTCDate(),
+    )}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(
+      date.getUTCSeconds(),
+    )}+08:00`;
+  }
+
+  private formatTableCrawlRows<T extends { rows: any[] }>(data: T): T {
+    return {
+      ...data,
+      rows: data.rows.map((row) => ({
+        ...row,
+        ...(Object.prototype.hasOwnProperty.call(row, 'callDate')
+          ? { callDate: this.formatCrmBeijingDateTime(row.callDate) }
+          : {}),
+        ...(Object.prototype.hasOwnProperty.call(row, 'endDate')
+          ? { endDate: this.formatCrmBeijingDateTime(row.endDate) }
+          : {}),
+      })),
+    };
+  }
+
   // 广播表格抓取每页新增的行
   broadcastVoiceTableRows(data: {
     crmKey?: string;
@@ -516,12 +543,15 @@ export class WebsocketGateway
     taskId: string;
     timestamp: string;
   }) {
-    if (data.crmKey) {
-      this.server.to(tableCrawlRoom(data.crmKey)).emit('table-crawl:rows', data);
+    const payload = this.formatTableCrawlRows(data);
+    if (payload.crmKey) {
+      this.server
+        .to(tableCrawlRoom(payload.crmKey))
+        .emit('table-crawl:rows', payload);
     }
-    this.server.to(ROOM_TABLE_CRAWL).emit('table-crawl:rows', data);
+    this.server.to(ROOM_TABLE_CRAWL).emit('table-crawl:rows', payload);
     this.logger.log(
-      `广播表格新增行: ${data.module} mid=${data.mid} page=${data.page} +${data.rows.length}`,
+      `广播表格新增行: ${payload.module} mid=${payload.mid} page=${payload.page} +${payload.rows.length}`,
     );
   }
 

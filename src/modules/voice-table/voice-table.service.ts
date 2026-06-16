@@ -799,7 +799,11 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
             capturedAt: summary.capturedAt,
           }
         : null,
-      items,
+      items: items.map((item) => ({
+        ...item,
+        callDate: this.formatCrmBeijingDateTime(item.callDate),
+        endDate: this.formatCrmBeijingDateTime(item.endDate),
+      })),
       pagination: {
         page,
         limit,
@@ -1831,6 +1835,18 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
     return new Date(date.getTime() + 8 * 60 * 60 * 1000)
       .toISOString()
       .slice(0, 10);
+  }
+
+  private formatCrmBeijingDateTime(value: Date | string | null): string | null {
+    if (!value) return null;
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(
+      date.getUTCDate(),
+    )}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(
+      date.getUTCSeconds(),
+    )}+08:00`;
   }
 
   private getBeijingDayUtcRange(dateKey: string): {
