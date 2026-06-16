@@ -36,6 +36,17 @@ interface CallRecordEntry {
   capturedAt: string;
 }
 
+interface TableCrawlSummaryEvent {
+  crmKey?: string;
+  module: string;
+  mid: number;
+  summary: any;
+  totalPages: number;
+  pagesToFetch: number;
+  capturedAt: string;
+  taskId: string;
+}
+
 @WebSocketGateway({
   cors: {
     origin: true, // 允许所有来源（动态返回请求的 origin）
@@ -58,6 +69,11 @@ export class WebsocketGateway
    * 该 Map 只保留每种类型的最新一条，内存上界 = crmKey 数 × recordType 数 × body 大小。
    */
   private readonly callRecordLatestMap = new Map<string, CallRecordEntry>();
+  /** key = normalized crmKey + module + mid，供 table-crawl 订阅后立即推送最新汇总 */
+  private readonly tableCrawlSummaryLatestMap = new Map<
+    string,
+    TableCrawlSummaryEvent
+  >();
 
   private readonly requestHistory: Array<{
     id: string;
@@ -221,6 +237,7 @@ export class WebsocketGateway
     if (keys.length === 0) {
       this.logger.log(`Client ${client.id} subscribed to table crawl (legacy room)`);
       client.join(ROOM_TABLE_CRAWL);
+      this.emitLatestTableCrawlSummaries(client);
       return { success: true };
     }
 
@@ -232,6 +249,7 @@ export class WebsocketGateway
     this.logger.log(
       `Client ${client.id} subscribed to table-crawl crmKeys=[${keys.join(',')}]`,
     );
+    this.emitLatestTableCrawlSummaries(client, keys);
     return { success: true };
   }
 
@@ -456,6 +474,38 @@ export class WebsocketGateway
     this.logger.log(`广播通话状态变更: ${data.recordType} → ${data.status}`);
   }
 
+  private rememberTableCrawlSummary(data: TableCrawlSummaryEvent) {
+    if (!data.crmKey) return;
+    this.tableCrawlSummaryLatestMap.set(
+      this.tableCrawlSummaryKey(data.crmKey, data.module, data.mid),
+      data,
+    );
+  }
+
+  private emitLatestTableCrawlSummaries(client: Socket, crmKeys?: string[]) {
+    const seen = new Set<string>();
+    const normalizedKeys = crmKeys?.map(normalizeCrmKey).filter(Boolean);
+
+    for (const [key, summary] of this.tableCrawlSummaryLatestMap.entries()) {
+      if (normalizedKeys?.length) {
+        const [crmKey] = key.split('|');
+        if (!normalizedKeys.includes(crmKey)) continue;
+      }
+      const dedupeKey = `${summary.crmKey ?? ''}|${summary.module}|${summary.mid}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      client.emit('table-crawl:summary', summary);
+    }
+  }
+
+  private tableCrawlSummaryKey(
+    crmKey: string,
+    module: string,
+    mid: number,
+  ): string {
+    return `${normalizeCrmKey(crmKey)}|${module}|${mid}`;
+  }
+
   // 广播表格抓取每页新增的行
   broadcastVoiceTableRows(data: {
     crmKey?: string;
@@ -476,16 +526,8 @@ export class WebsocketGateway
   }
 
   // 广播表格抓取汇总
-  broadcastVoiceTableSummary(data: {
-    crmKey?: string;
-    module: string;
-    mid: number;
-    summary: any;
-    totalPages: number;
-    pagesToFetch: number;
-    capturedAt: string;
-    taskId: string;
-  }) {
+  broadcastVoiceTableSummary(data: TableCrawlSummaryEvent) {
+    this.rememberTableCrawlSummary(data);
     if (data.crmKey) {
       this.server
         .to(tableCrawlRoom(data.crmKey))

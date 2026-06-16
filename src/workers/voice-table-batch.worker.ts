@@ -48,7 +48,7 @@ const IVR_INITIAL_REFRESH_DELAY_MS = 2 * 60 * 1000;
 /** 初始状态最多跟踪 1 小时，避免无限追请求 */
 const IVR_INITIAL_REFRESH_TTL_MS = 60 * 60 * 1000;
 /** OP 页数较小，直接全量扫以持续修正后变状态 */
-const VOICE_OP_FULL_SCAN_MAX_PAGES = 100;
+const VOICE_OP_FULL_SCAN_MAX_PAGES = 200;
 
 type Headers = Record<string, string>;
 
@@ -886,7 +886,7 @@ async function persistRows(
     .into(tableName)
     .values(values)
     .onConflict(
-      `("crmKey", src, dst, ("callDate"::date)) WHERE "callDate" IS NOT NULL DO UPDATE SET
+      `${module === 'voice_dm_op' ? '("crmKey", src, dst, "callDate") WHERE "callDate" IS NOT NULL' : '("crmKey", src, dst, ("callDate"::date)) WHERE "callDate" IS NOT NULL'} DO UPDATE SET
         mid = EXCLUDED.mid,
         "recordKey" = EXCLUDED."recordKey",
         task = EXCLUDED.task,

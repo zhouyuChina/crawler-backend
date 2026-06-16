@@ -86,7 +86,7 @@ const IVR_INITIAL_REFRESH_BATCH_SIZE = 50;
 /** 初始状态补偿请求并发 */
 const IVR_INITIAL_REFRESH_CONCURRENCY = 3;
 /** OP 页数较小，直接全量扫以持续修正后变状态 */
-const VOICE_OP_FULL_SCAN_MAX_PAGES = 100;
+const VOICE_OP_FULL_SCAN_MAX_PAGES = 200;
 type Headers = Record<string, string>;
 
 interface PageRange {
@@ -2359,7 +2359,7 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
       .into(tableName)
       .values(entities)
       .onConflict(
-        `("crmKey", src, dst, ("callDate"::date)) WHERE "callDate" IS NOT NULL DO UPDATE SET
+        `${module === 'voice_dm_op' ? '("crmKey", src, dst, "callDate") WHERE "callDate" IS NOT NULL' : '("crmKey", src, dst, ("callDate"::date)) WHERE "callDate" IS NOT NULL'} DO UPDATE SET
           mid = EXCLUDED.mid,
           "recordKey" = EXCLUDED."recordKey",
           task = EXCLUDED.task,
