@@ -1551,7 +1551,16 @@ export class VoiceTableService implements OnModuleInit, OnModuleDestroy {
       child.stderr?.on('data', (chunk) => {
         this.logger.warn(`[voice-table-worker] ${String(chunk).trim()}`);
       });
-      child.on('message', (message) => {
+      child.on('message', (message: any) => {
+        if (message?.type === 'table-crawl:rows') {
+          this.ws.broadcastVoiceTableRows(message.data);
+          return;
+        }
+        if (message?.type === 'table-crawl:summary') {
+          this.ws.broadcastVoiceTableSummary(message.data);
+          return;
+        }
+
         settled = true;
         cleanup();
         resolve(message as any);

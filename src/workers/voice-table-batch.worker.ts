@@ -73,6 +73,7 @@ interface WorkerPayload {
   discoveredTotalPages?: number;
   pageRanges?: WorkerPageRange[];
   initialLastCompletedPage?: number;
+  taskId?: string;
 }
 
 interface WorkerResult {
@@ -88,6 +89,58 @@ interface WorkerResult {
   pagesToFetch?: number;
   hasMoreHistory?: boolean;
   error?: string;
+}
+
+type WorkerEvent =
+  | { type: 'table-crawl:rows'; data: any }
+  | { type: 'table-crawl:summary'; data: any };
+
+function sendEvent(event: WorkerEvent) {
+  if (process.send) process.send(event);
+}
+
+function emitRowsChanged(
+  payload: WorkerPayload,
+  module: VoiceModule,
+  page: number,
+  rows: any[],
+) {
+  if (rows.length === 0) return;
+  sendEvent({
+    type: 'table-crawl:rows',
+    data: {
+      crmKey: payload.crmKey,
+      module,
+      mid: payload.mid,
+      page,
+      rows,
+      taskId: payload.taskId ?? '',
+      timestamp: new Date().toISOString(),
+    },
+  });
+}
+
+function emitSummaryChanged(
+  payload: WorkerPayload,
+  module: VoiceModule,
+  summary: any,
+  totalPages: number,
+  pagesToFetch: number,
+  capturedAt: Date,
+) {
+  sendEvent({
+    type: 'table-crawl:summary',
+    data: {
+      crmKey: payload.crmKey,
+      module,
+      mid: payload.mid,
+      summary,
+      totalPages,
+      pagesToFetch,
+      capturedAt: capturedAt.toISOString(),
+      taskId: payload.taskId ?? '',
+    },
+  });
 }
 
 async function main() {
@@ -447,6 +500,7 @@ async function runStartCrawl(
   logWorker(
     `start first-page persisted module=${strategy.module} mid=${payload.mid} inserted=${insertedFirst.length} ranges=${pageRanges.map((r) => `${r.label}:${r.start}-${r.end}`).join(',') || 'none'}`,
   );
+  emitRowsChanged(payload, strategy.module, 1, insertedFirst);
 
   if (
     strategy.module === 'voice_ivr' &&
@@ -458,7 +512,8 @@ async function runStartCrawl(
     pagesToFetch = 1;
   }
 
-  await persistSummary(
+  const capturedAt = new Date();
+  const summaryChanged = await persistSummary(
     dataSource,
     strategy,
     payload.crmKey,
@@ -468,8 +523,18 @@ async function runStartCrawl(
     firstParsed.summaryMatched,
     totalPages,
     pagesToFetch,
-    new Date(),
+    capturedAt,
   );
+  if (summaryChanged) {
+    emitSummaryChanged(
+      payload,
+      strategy.module,
+      firstParsed.summary,
+      totalPages,
+      pagesToFetch,
+      capturedAt,
+    );
+  }
 
   await upsertCrawlState(dataSource, payload.crmKey, strategy.module, payload.mid, {
     totalPages: isIncomplete && strategy.module !== 'voice_ivr' ? crawlState.totalPages : totalPages,
@@ -592,12 +657,17 @@ async function runBatch(
       const results = await Promise.all(
         pages.map(async (currentPage) => {
           try {
+            const isHistoryMode =
+              strategy.module === 'voice_ivr' &&
+              (range.initialCompletedDate != null ||
+                range.end - range.start + 1 >= CHECKPOINT_INTERVAL_PAGES);
             const outcome = await crawlPage(
               dataSource,
               strategy,
               payload,
               currentPage,
               anchorKeys,
+              isHistoryMode,
             );
             return { page: currentPage, outcome };
           } catch (error) {
@@ -722,6 +792,7 @@ async function crawlPage(
   payload: WorkerPayload,
   page: number,
   anchorKeys: Set<string>,
+  isHistoryMode = false,
 ) {
   const pageUrl = ensurePageIdParam(payload.baseUrl, page);
   const html = await fetchHtmlWithRetry(pageUrl, payload.headers);
@@ -734,6 +805,9 @@ async function crawlPage(
     payload.baseUrl,
     parsed.rows,
   );
+  if (!isHistoryMode) {
+    emitRowsChanged(payload, strategy.module, page, inserted);
+  }
 
   return {
     insertedCount: inserted.length,
@@ -999,8 +1073,8 @@ async function persistSummary(
   totalPages: number,
   pagesToFetch: number,
   capturedAt: Date,
-) {
-  if (!summaryMatched) return;
+): Promise<boolean> {
+  if (!summaryMatched) return false;
 
   if (strategy.module === 'voice_ivr') {
     const repo = dataSource.getRepository(VoiceIvrSummary);
@@ -1018,7 +1092,7 @@ async function persistSummary(
       last.totalPages === totalPages
     ) {
       await repo.update(last.id, { capturedAt });
-      return;
+      return false;
     }
     await repo.save({
       id: uuidv4(),
@@ -1033,7 +1107,7 @@ async function persistSummary(
       sourceUrl,
       capturedAt,
     });
-    return;
+    return true;
   }
 
   const repo = getOpSummaryRepo(dataSource, strategy.module);
@@ -1055,7 +1129,7 @@ async function persistSummary(
     last.totalPages === totalPages
   ) {
     await repo.update(last.id, { capturedAt });
-    return;
+    return false;
   }
   await repo.save({
     id: uuidv4(),
@@ -1072,6 +1146,7 @@ async function persistSummary(
     sourceUrl,
     capturedAt,
   });
+  return true;
 }
 
 async function getLastTotalPages(
