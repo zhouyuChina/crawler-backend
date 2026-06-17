@@ -49,10 +49,15 @@ export class CrmAuthService implements OnModuleInit {
   async onModuleInit() {
     const pending = await this.profileRepo.find({
       where: { authStatus: 'human_check_required' },
-      select: ['id'],
     });
     for (const profile of pending) {
       this.humanCheckNotified.add(profile.id);
+    }
+    if (pending.length > 0) {
+      await this.telegramNotify.notifyHumanCheckRequiredBatch(pending);
+      this.logger.warn(
+        `启动时发现 ${pending.length} 个 CRM 仍需人工验证，已发送提醒`,
+      );
     }
   }
 
