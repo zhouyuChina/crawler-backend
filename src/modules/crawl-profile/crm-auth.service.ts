@@ -185,6 +185,15 @@ export class CrmAuthService implements OnModuleInit {
       if (restored || cookieChanged) {
         this.onCookiesSynced?.(profile.id);
       }
+      if (restored) {
+        void this.warmupVoiceCallStatus(profile, '插件认证恢复后').catch(
+          (err: any) => {
+            this.logger.warn(
+              `插件认证恢复后预热异常 ${profile.name} (${profile.baseUrl}): ${err.message}`,
+            );
+          },
+        );
+      }
       matched++;
       this.logger.log(
         `已从插件同步 Cookie → ${profile.name} (${profile.baseUrl})${
@@ -216,8 +225,11 @@ export class CrmAuthService implements OnModuleInit {
     return !!cached && Date.now() < cached.expiresAt;
   }
 
-  /** 手动 run-once 前预热语音呼叫状态页，复用浏览器菜单里的真实 mid */
-  async warmupVoiceCallStatus(profile: CrawlProfile): Promise<boolean> {
+  /** 预热语音呼叫状态页，复用浏览器菜单里的真实 mid */
+  async warmupVoiceCallStatus(
+    profile: CrawlProfile,
+    reason = '手动执行前',
+  ): Promise<boolean> {
     const cookieHeader = await this.getCookies(profile);
     if (!cookieHeader) return false;
 
@@ -241,16 +253,16 @@ export class CrmAuthService implements OnModuleInit {
       ) {
         this.updateCookiesFromSetCookie(profile.id, monitorResult.setCookies);
         this.logger.debug(
-          `手动执行前预热 cc_monitor 成功 ${baseUrl}: status=${monitorResult.statusCode}`,
+          `${reason}预热 cc_monitor 成功 ${baseUrl}: status=${monitorResult.statusCode}`,
         );
         return true;
       }
 
       this.logger.warn(
-        `手动执行前预热 cc_monitor 返回异常 ${baseUrl}: status=${monitorResult.statusCode}`,
+        `${reason}预热 cc_monitor 返回异常 ${baseUrl}: status=${monitorResult.statusCode}`,
       );
     } catch (err: any) {
-      this.logger.warn(`手动执行前预热 cc_monitor 失败 ${baseUrl}: ${err.message}`);
+      this.logger.warn(`${reason}预热 cc_monitor 失败 ${baseUrl}: ${err.message}`);
     }
 
     return false;

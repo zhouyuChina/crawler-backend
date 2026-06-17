@@ -61,7 +61,7 @@ const TASK_DEFS: Record<TaskKey, TaskDef> = {
     },
   },
   cc_voiceivr: {
-    intervalMs: 5 * 60 * 1000,
+    intervalMs: 3 * 60 * 1000,
     buildUrl: (p) => `${p.baseUrl}/modules/cc_voiceivr/`,
   },
   cc_voiceivr_initial_refresh: {
@@ -72,7 +72,7 @@ const TASK_DEFS: Record<TaskKey, TaskDef> = {
     },
   },
   cc_voiceop: {
-    intervalMs: 5 * 60 * 1000,
+    intervalMs: 3 * 60 * 1000,
     buildUrl: (p) => {
       const mid = p.mids?.manualRecords ?? 25;
       return `${p.baseUrl}/modules/cc_voiceop/?mid=${mid}`;
@@ -80,7 +80,7 @@ const TASK_DEFS: Record<TaskKey, TaskDef> = {
     isTable: true,
   },
   dm_voiceop: {
-    intervalMs: 5 * 60 * 1000,
+    intervalMs: 3 * 60 * 1000,
     buildUrl: (p) => {
       const mid = p.mids?.manualRecords ?? 25;
       return `${p.baseUrl}/modules/dm_voiceop/?mid=${mid}`;
