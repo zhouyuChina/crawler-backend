@@ -235,7 +235,7 @@ export class CrmAuthService implements OnModuleInit {
     profile: CrawlProfile,
     reason = '手动执行前',
   ): Promise<boolean> {
-    const cookieHeader = await this.getCookies(profile);
+    let cookieHeader = await this.getCookies(profile);
     if (!cookieHeader) return false;
 
     const baseUrl = profile.baseUrl;
@@ -256,7 +256,19 @@ export class CrmAuthService implements OnModuleInit {
         monitorResult.statusCode < 400 &&
         !this.looksLikeAuthFailure(monitorResult.body)
       ) {
-        this.updateCookiesFromSetCookie(profile.id, monitorResult.setCookies);
+        const mergedCookieHeader = this.updateCookiesFromSetCookie(
+          profile.id,
+          monitorResult.setCookies,
+        );
+        cookieHeader = mergedCookieHeader ?? cookieHeader;
+        cookieHeader = await this.warmupShowMode({
+          baseUrl,
+          username: profile.username,
+          cookieHeader,
+          referer: monitorUrl,
+          reason,
+          profileId: profile.id,
+        });
         this.logger.debug(
           `${reason}预热 cc_monitor 成功 ${baseUrl}: status=${monitorResult.statusCode}`,
         );
@@ -492,6 +504,13 @@ export class CrmAuthService implements OnModuleInit {
           ...cookieHeader.split(';').map((part) => part.trim()),
           ...monitorResult.setCookies,
         ]);
+        cookieHeader = await this.warmupShowMode({
+          baseUrl,
+          username: profile.username,
+          cookieHeader,
+          referer: monitorUrl,
+          reason: '登录后',
+        });
         this.logger.debug(
           `登录后预热 cc_monitor 成功 ${baseUrl}: status=${monitorResult.statusCode}`,
         );
@@ -537,6 +556,61 @@ export class CrmAuthService implements OnModuleInit {
     }
 
     return cookieHeader;
+  }
+
+  private async warmupShowMode(args: {
+    baseUrl: string;
+    username: string;
+    cookieHeader: string;
+    referer: string;
+    reason: string;
+    profileId?: string;
+  }): Promise<string> {
+    const body = new URLSearchParams({
+      show_mode: '1',
+      muser: args.username,
+      max_seg: '0',
+      search: '',
+    }).toString();
+
+    try {
+      const result = await this.httpPost(
+        `${args.baseUrl}/modules/cc_monitor/show_mode.php`,
+        body,
+        {
+          Accept: '*/*',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Cookie: args.cookieHeader,
+          Referer: args.referer,
+          'User-Agent': CRM_BROWSER_USER_AGENT,
+          'Accept-Language': 'zh-CN,zh;q=0.9',
+        },
+      );
+
+      if (result.statusCode >= 400 || this.looksLikeAuthFailure(result.body)) {
+        this.logger.warn(
+          `${args.reason}预热 show_mode 返回异常 ${args.baseUrl}: status=${result.statusCode}`,
+        );
+        return args.cookieHeader;
+      }
+
+      const nextCookieHeader = this.mergeCookieHeaderWithSetCookies(
+        args.cookieHeader,
+        result.setCookies,
+      );
+      if (args.profileId) {
+        this.updateCookiesFromSetCookie(args.profileId, result.setCookies);
+      }
+      this.logger.debug(
+        `${args.reason}预热 show_mode 成功 ${args.baseUrl}: status=${result.statusCode}`,
+      );
+      return nextCookieHeader;
+    } catch (err: any) {
+      this.logger.warn(
+        `${args.reason}预热 show_mode 失败 ${args.baseUrl}: ${err.message}`,
+      );
+      return args.cookieHeader;
+    }
   }
 
   private async resolveVoiceCallStatusUrl(
